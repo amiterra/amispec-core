@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/amispec-schema",
+    "crates/amispec-validate",
+    "crates/amispec-compile",
+    "crates/amispec-cli",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/amispec/amispec-core"
+rust-version = "1.85"
+
+[workspace.dependencies]
+amispec-schema = { path = "crates/amispec-schema", version = "0.2.0" }
+amispec-validate = { path = "crates/amispec-validate", version = "0.2.0" }
+amispec-compile = { path = "crates/amispec-compile", version = "0.2.0" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# Faster local debug builds; deps are cached and only rebuilt when lockfile changes.
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 1

@@ -1,0 +1,6 @@
+target
+**/.DS_Store
+**/.git
+python
+README.md
+dockerignore-root.dockerignore

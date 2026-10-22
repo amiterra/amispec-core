@@ -1,0 +1,20 @@
+[package]
+name = "amispec-validate"
+description = "AmiSpec configuration validator — structural + semantic checks against AmiSpec 1.0 schemas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "amispec_validate"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+walkdir = { workspace = true }

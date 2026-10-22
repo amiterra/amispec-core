@@ -1,0 +1,19 @@
+[package]
+name = "amispec-compile"
+description = "AmiSpec compiler: ComponentPassport + TopologyBlueprint → k3s/FluxCD, with lossless decompile via Provenance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+amispec-schema = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+amispec-validate = { workspace = true }

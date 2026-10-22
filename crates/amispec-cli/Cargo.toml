@@ -1,0 +1,21 @@
+[package]
+name = "amispec-cli"
+description = "Thin CLI for AmiSpec validate/compile (library-first; amiterra `ami` embeds the crates)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "amispec"
+path = "src/main.rs"
+
+[dependencies]
+amispec-schema = { workspace = true }
+amispec-validate = { workspace = true }
+amispec-compile = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+walkdir = { workspace = true }
+serde_yaml = { workspace = true }
