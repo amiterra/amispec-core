@@ -25,7 +25,7 @@ Standard sources live in [AmiSpec](https://github.com/amiterra/amispec) (`docs/s
 
 * Covers kind/apiVersion, metadata, parameters, topologyModes, workload,
   interfaces (endpoints, `clientContract`, provisioner), hardware/kernel,
-  operations, topology clusters/nodes/CNI/components/bindings, CanvasLayout.
+  operations, topology clusters/nodes/CNI/components/bindings.
 * Hand-written pattern matchers (no `regex`); `cue vet` only as optional layer.
 * Error format: `error|warn [<rule-id>] <path>: <message>`.
 

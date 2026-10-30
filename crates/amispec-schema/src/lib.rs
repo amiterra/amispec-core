@@ -15,15 +15,12 @@ pub const AMISPEC_STANDARD_VERSION: &str = "1.0.0";
 pub const API_VERSION_PASSPORT: &str = "catalog.amispec.io/v1";
 /// `apiVersion` for TopologyBlueprint documents.
 pub const API_VERSION_TOPOLOGY: &str = "topology.amispec.io/v1";
-/// `apiVersion` for CanvasLayout documents.
-pub const API_VERSION_LAYOUT: &str = "topology.amispec.io/v1";
 
 /// Discriminator of an AmiSpec document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentKind {
     ComponentPassport,
     TopologyBlueprint,
-    CanvasLayout,
 }
 
 impl DocumentKind {
@@ -31,7 +28,6 @@ impl DocumentKind {
         match s {
             "ComponentPassport" => Some(Self::ComponentPassport),
             "TopologyBlueprint" => Some(Self::TopologyBlueprint),
-            "CanvasLayout" => Some(Self::CanvasLayout),
             _ => None,
         }
     }
@@ -40,7 +36,6 @@ impl DocumentKind {
         match self {
             Self::ComponentPassport => "ComponentPassport",
             Self::TopologyBlueprint => "TopologyBlueprint",
-            Self::CanvasLayout => "CanvasLayout",
         }
     }
 }

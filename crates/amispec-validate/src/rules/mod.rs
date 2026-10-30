@@ -2,7 +2,6 @@
 
 pub mod cue;
 pub mod deep;
-mod layout;
 mod passport;
 mod topology;
 
@@ -25,7 +24,6 @@ pub(crate) fn validate(kind: DocumentKind, root: &Map, report: &mut Report) {
     match kind {
         DocumentKind::ComponentPassport => passport::check(root, &mut findings),
         DocumentKind::TopologyBlueprint => topology::check(root, &mut findings),
-        DocumentKind::CanvasLayout => layout::check(root, &mut findings),
     }
     for f in findings {
         report.push(f);

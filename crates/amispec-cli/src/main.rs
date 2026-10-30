@@ -35,7 +35,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Validate AmiSpec YAML documents (passport / topology / layout)
+    /// Validate AmiSpec YAML documents (passport / topology)
     Validate {
         /// Files or directories to validate
         paths: Vec<PathBuf>,

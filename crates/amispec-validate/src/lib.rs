@@ -1,6 +1,6 @@
 //! AmiSpec configuration validator.
 //!
-//! Validates `ComponentPassport`, `TopologyBlueprint`, and `CanvasLayout`
+//! Validates `ComponentPassport` and `TopologyBlueprint`
 //! documents against the AmiSpec 1.0 meta-schemas.
 //!
 //! # Design
@@ -47,7 +47,6 @@ pub const AMISPEC_STANDARD_VERSION: &str = "1.0.0";
 pub enum DocumentKind {
     ComponentPassport,
     TopologyBlueprint,
-    CanvasLayout,
 }
 
 impl DocumentKind {
@@ -55,7 +54,6 @@ impl DocumentKind {
         match self {
             Self::ComponentPassport => "ComponentPassport",
             Self::TopologyBlueprint => "TopologyBlueprint",
-            Self::CanvasLayout => "CanvasLayout",
         }
     }
 
@@ -63,7 +61,6 @@ impl DocumentKind {
         match s {
             "ComponentPassport" => Some(Self::ComponentPassport),
             "TopologyBlueprint" => Some(Self::TopologyBlueprint),
-            "CanvasLayout" => Some(Self::CanvasLayout),
             _ => None,
         }
     }
@@ -73,7 +70,7 @@ impl DocumentKind {
 pub fn expected_api_version(kind: DocumentKind) -> &'static str {
     match kind {
         DocumentKind::ComponentPassport => "catalog.amispec.io/v1",
-        DocumentKind::TopologyBlueprint | DocumentKind::CanvasLayout => "topology.amispec.io/v1",
+        DocumentKind::TopologyBlueprint => "topology.amispec.io/v1",
     }
 }
 
@@ -99,7 +96,7 @@ pub fn validate_str(source: &str, yaml: &str, opts: &Options) -> Report {
             "kind",
             "kind-enum",
             format!(
-                "unknown kind `{kind_str}` (expected ComponentPassport | TopologyBlueprint | CanvasLayout)"
+                "unknown kind `{kind_str}` (expected ComponentPassport | TopologyBlueprint)"
             ),
         ));
         return report;

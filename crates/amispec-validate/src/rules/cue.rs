@@ -18,11 +18,6 @@ pub fn run_cue_vet(kind: DocumentKind, yaml: &str, schema_dir: &str, report: &mu
             "topology_spec.cue",
             Some("component_passport.cue"),
         ),
-        DocumentKind::CanvasLayout => (
-            "#CanvasLayout",
-            "topology_spec.cue",
-            Some("component_passport.cue"),
-        ),
     };
 
     let schema_path = Path::new(schema_dir).join(schema_file);
