@@ -3,16 +3,14 @@
 //! Runs the `cue` binary (never a shell) against the normative CUE schemas.
 //! Missing `cue` is a warning, not a hard failure, so CI can choose.
 
-use crate::report::{Finding, Report};
 use crate::DocumentKind;
+use crate::report::{Finding, Report};
 use std::path::Path;
 use std::process::Command;
 
 pub fn run_cue_vet(kind: DocumentKind, yaml: &str, schema_dir: &str, report: &mut Report) {
     let (def, schema_file, extra) = match kind {
-        DocumentKind::ComponentPassport => {
-            ("#ComponentPassport", "component_passport.cue", None)
-        }
+        DocumentKind::ComponentPassport => ("#ComponentPassport", "component_passport.cue", None),
         DocumentKind::TopologyBlueprint => (
             "#TopologyBlueprint",
             "topology_spec.cue",

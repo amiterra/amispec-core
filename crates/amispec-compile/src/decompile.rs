@@ -5,9 +5,9 @@
 
 use crate::provenance::*;
 use amispec_schema::{
-    Binding, Cluster, ClusterSecurity, ComponentInstance, ComponentResources, ComponentTopology,
-    CrossClusterLink, CniConfig, Disc, Expose, ExternalResource, LoadBalancer, Node, NodeHardware,
-    TopologyBlueprint, TopologyMetadata,
+    Binding, Cluster, ClusterSecurity, CniConfig, ComponentInstance, ComponentResources,
+    ComponentTopology, CrossClusterLink, Disc, Expose, ExternalResource, LoadBalancer, Node,
+    NodeHardware, TopologyBlueprint, TopologyMetadata,
 };
 use serde_yaml::Value;
 use std::collections::BTreeMap;
@@ -26,7 +26,10 @@ pub struct DecompileReport {
 /// Decompile a directory tree (e.g. `out/clusters/`).
 pub fn decompile_dir(root: &Path) -> Result<DecompileReport, DecompileError> {
     if !root.exists() {
-        return Err(DecompileError::Io(format!("path not found: {}", root.display())));
+        return Err(DecompileError::Io(format!(
+            "path not found: {}",
+            root.display()
+        )));
     }
     let mut docs: Vec<Value> = Vec::new();
     let mut scanned = 0usize;
@@ -87,22 +90,55 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                     cb.nodes.insert(node.id.clone(), node);
                 }
             }
-            "GatewayClass" => {
+            "GatewayClass" | "Gateway" | "CiliumLoadBalancerIPPool" => {
                 let cb = clusters.entry(cluster_id).or_default();
-                if let Some(lb) = lb_from_gateway(doc, annotations) {
+                if let Some(lb) = lb_from_provenance(doc) {
                     cb.load_balancers.insert(lb.id.clone(), lb);
                 }
             }
+            "Service" => {
+                // L4 exposure service (type LoadBalancer) — also restores the
+                // balancer and its bare expose[] entry.
+                let labels_map = doc.get("metadata").and_then(|m| m.get("labels"));
+                let is_l4 = get_str(labels_map, "amispec.io/lb-layer").as_deref()
+                    == Some("l4-balancer")
+                    && get_str(labels_map, LABEL_ENDPOINT).is_some();
+                if !is_l4 {
+                    continue;
+                }
+                let cb = clusters.entry(cluster_id).or_default();
+                if let Some(lb) = lb_from_provenance(doc) {
+                    cb.load_balancers.insert(lb.id.clone(), lb);
+                }
+                if let Some(cid) = component_id.clone() {
+                    let comp = cb
+                        .components
+                        .entry(cid.clone())
+                        .or_insert_with(|| blank_component(&cid));
+                    if let Some(ex) = route_to_expose(doc) {
+                        if !comp.expose.iter().any(|e| e.endpoint == ex.endpoint) {
+                            comp.expose.push(ex);
+                        }
+                    }
+                }
+            }
             "Deployment" | "StatefulSet" => {
-                let Some(cid) = component_id.clone() else { continue };
+                let Some(cid) = component_id.clone() else {
+                    continue;
+                };
                 let cb = clusters.entry(cluster_id).or_default();
                 let entry = cb.components.entry(cid.clone()).or_insert_with(|| {
-                    let pin = get_str(labels, LABEL_PASSPORT)
-                        .and_then(|p| parse_passport_pin(&p));
+                    let pin = get_str(labels, LABEL_PASSPORT).and_then(|p| parse_passport_pin(&p));
                     ComponentInstance {
                         id: cid,
-                        passport: pin.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| "unknown".into()),
-                        version: pin.as_ref().map(|p| p.1.clone()).unwrap_or_else(|| "0.0.0".into()),
+                        passport: pin
+                            .as_ref()
+                            .map(|p| p.0.clone())
+                            .unwrap_or_else(|| "unknown".into()),
+                        version: pin
+                            .as_ref()
+                            .map(|p| p.1.clone())
+                            .unwrap_or_else(|| "0.0.0".into()),
                         passport_rev: pin.map(|p| p.2).unwrap_or(1),
                         topology: ComponentTopology {
                             mode: "standalone".into(),
@@ -122,12 +158,15 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                         bootstrap: None,
                         bindings: Vec::new(),
                         expose: Vec::new(),
+                        workload_override: None,
                     }
                 });
                 apply_workload_facts(entry, doc, labels, annotations);
             }
             "Secret" => {
-                let Some(cid) = component_id.clone() else { continue };
+                let Some(cid) = component_id.clone() else {
+                    continue;
+                };
                 let cb = clusters.entry(cluster_id).or_default();
                 let comp = cb
                     .components
@@ -151,7 +190,9 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                 }
             }
             "HorizontalPodAutoscaler" => {
-                let Some(cid) = component_id.clone() else { continue };
+                let Some(cid) = component_id.clone() else {
+                    continue;
+                };
                 let cb = clusters.entry(cluster_id).or_default();
                 let comp = cb
                     .components
@@ -161,8 +202,10 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                     comp.topology.autoscaling = Some(as_);
                 }
             }
-            "HTTPRoute" => {
-                let Some(cid) = component_id.clone() else { continue };
+            "HTTPRoute" | "Ingress" => {
+                let Some(cid) = component_id.clone() else {
+                    continue;
+                };
                 let cb = clusters.entry(cluster_id).or_default();
                 let comp = cb
                     .components
@@ -183,6 +226,12 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                     if let Some(l) = link_from_cm(doc, annotations) {
                         links.push(l);
                     }
+                } else if get_str(annotations, LABEL_LB_PROVIDER).is_some() {
+                    // trust-border / prereq ConfigMaps carry balancer provenance
+                    let cb = clusters.entry(cluster_id).or_default();
+                    if let Some(lb) = lb_from_provenance(doc) {
+                        cb.load_balancers.insert(lb.id.clone(), lb);
+                    }
                 }
             }
             _ => {}
@@ -190,9 +239,9 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
     }
 
     if clusters.is_empty() && externals.is_empty() {
-        report.warnings.push(
-            "no AmiSpec provenance found; decompile produced an empty topology".into(),
-        );
+        report
+            .warnings
+            .push("no AmiSpec provenance found; decompile produced an empty topology".into());
         report.topology = None;
         return report;
     }
@@ -214,6 +263,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
             id,
             name,
             domain,
+            k3s_channel: cb.k3s_channel.take(),
             security: Some(ClusterSecurity {
                 sops_recipients: std::mem::take(&mut cb.sops_recipients),
                 implicit_telemetry_layer: Some(true),
@@ -259,6 +309,7 @@ struct ClusterBuilder {
     maintenance_window: Option<String>,
     name: Option<String>,
     domain: Option<String>,
+    k3s_channel: Option<String>,
     sops_recipients: Vec<String>,
     cni: Option<CniConfig>,
     nodes: BTreeMap<String, Node>,
@@ -290,6 +341,7 @@ fn blank_component(id: &str) -> ComponentInstance {
         bootstrap: None,
         bindings: Vec::new(),
         expose: Vec::new(),
+        workload_override: None,
     }
 }
 
@@ -329,8 +381,12 @@ fn node_from_tuning(doc: &Value) -> Option<Node> {
         monthly_cost_usd: None,
         hardware: NodeHardware {
             arch: get_str(Some(hw), "arch"),
-            cpu_cores: get(Some(hw), "cpuCores").and_then(|v| v.as_f64()).unwrap_or(1.0),
-            memory_mb: get(Some(hw), "memoryMb").and_then(|v| v.as_u64()).unwrap_or(1024),
+            cpu_cores: get(Some(hw), "cpuCores")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0),
+            memory_mb: get(Some(hw), "memoryMb")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1024),
             system_reserved_mb: get(Some(hw), "systemReservedMb").and_then(|v| v.as_u64()),
             system_disk_reserved_gb: get(Some(hw), "systemDiskReservedGb").and_then(|v| v.as_u64()),
             lvm_snapshot_reserve_percent: get(Some(hw), "lvmSnapshotReservePercent")
@@ -352,27 +408,28 @@ fn node_from_tuning(doc: &Value) -> Option<Node> {
     })
 }
 
-fn lb_from_gateway(doc: &Value, annotations: Option<&Value>) -> Option<LoadBalancer> {
+/// Restore a `LoadBalancer` from provenance labels/annotations (Design Doc
+/// 0025 §2.2). Sources: GatewayClass/Gateway (l7), CiliumLoadBalancerIPPool
+/// and L4 Services (l4), trust-border ConfigMaps (edge-proxy).
+fn lb_from_provenance(doc: &Value) -> Option<LoadBalancer> {
+    let meta = doc.get("metadata");
+    let labels = meta.and_then(|m| m.get("labels"));
+    let annotations = meta.and_then(|m| m.get("annotations"));
     let name = meta_name(doc)?;
-    let labels = get(doc.get("metadata"), "labels")?;
-    let id = get_str(Some(labels), "amispec.io/lb-id").unwrap_or_else(|| {
-        name.split_once('-')
-            .map(|(_, r)| r.to_string())
-            .unwrap_or(name)
-    });
+    let id = get_str(labels, LABEL_LB_ID).unwrap_or(name);
+    let trusted_proxy_source = get_str(annotations, LABEL_TRUSTED_PROXY_SOURCE)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     Some(LoadBalancer {
         id,
-        layer: get_str(Some(labels), "amispec.io/lb-layer")
-            .unwrap_or_else(|| "l7-gateway".into()),
-        provider: get_str(annotations, "amispec.io/lb-provider")
-            .unwrap_or_else(|| "cilium-envoy".into()),
-        upstream_edge: get_str(annotations, "amispec.io/upstream-edge"),
-        trusted_proxy_source: None,
-        forwarding_mode: get_str(annotations, "amispec.io/forwarding-mode"),
-        floating_ip_ref: None,
-        proxy_protocol_v2: None,
-        http3_quic: None,
-        tls: get_str(annotations, "amispec.io/tls"),
+        layer: get_str(labels, LABEL_LB_LAYER).unwrap_or_else(|| "l7-gateway".into()),
+        provider: get_str(annotations, LABEL_LB_PROVIDER).unwrap_or_else(|| "cilium-envoy".into()),
+        upstream_edge: get_str(annotations, LABEL_UPSTREAM_EDGE),
+        trusted_proxy_source,
+        forwarding_mode: get_str(annotations, LABEL_FORWARDING_MODE),
+        floating_ip_ref: get_str(annotations, LABEL_FLOATING_IP_REF),
+        proxy_protocol_v2: get_str(annotations, LABEL_PROXY_PROTOCOL_V2).map(|s| s == "true"),
+        http3_quic: get_str(annotations, LABEL_HTTP3_QUIC).map(|s| s == "true"),
+        tls: get_str(annotations, LABEL_LB_TLS),
     })
 }
 
@@ -426,7 +483,10 @@ fn apply_user_delta(comp: &mut ComponentInstance, delta_json: &str) {
     if let Some(rep) = v.pointer("/topology/replicas").and_then(|x| x.as_u64()) {
         comp.topology.replicas = Some(rep as u32);
     }
-    if let Some(comm) = v.pointer("/topology/committedReplicas").and_then(|x| x.as_u64()) {
+    if let Some(comm) = v
+        .pointer("/topology/committedReplicas")
+        .and_then(|x| x.as_u64())
+    {
         comp.topology.committed_replicas = Some(comm as u32);
     }
     if let Some(cpu) = v.pointer("/resources/cpuCores").and_then(|x| x.as_f64()) {
@@ -451,6 +511,14 @@ fn apply_user_delta(comp: &mut ComponentInstance, delta_json: &str) {
         }
         comp.config = Some(map);
     }
+    if let Some(image) = v
+        .pointer("/workloadOverride/image")
+        .and_then(|x| x.as_str())
+    {
+        comp.workload_override = Some(amispec_schema::WorkloadOverride {
+            image: Some(image.to_string()),
+        });
+    }
 }
 
 fn parse_edge(edge: &str, from: &str) -> Option<Binding> {
@@ -473,7 +541,6 @@ fn parse_edge(edge: &str, from: &str) -> Option<Binding> {
     })
 }
 
-
 fn hpa_to_autoscaling(doc: &Value) -> Option<amispec_schema::Autoscaling> {
     let spec = doc.get("spec")?;
     let min = get(Some(spec), "minReplicas").and_then(|v| v.as_u64())? as u32;
@@ -492,26 +559,71 @@ fn hpa_to_autoscaling(doc: &Value) -> Option<amispec_schema::Autoscaling> {
     })
 }
 
+/// Restore an `expose[]` entry from a compiled route (HTTPRoute / Ingress /
+/// L4 Service). Host semantics are reconstructed from
+/// `amispec.io/host-source` + `amispec.io/host-value` (Design Doc 0025 §1.5);
+/// `securityPolicy` round-trips from `amispec.io/security-policy`.
 fn route_to_expose(doc: &Value) -> Option<Expose> {
     let name = meta_name(doc)?;
-    let labels = get(doc.get("metadata"), "labels")?;
-    let endpoint = name.split_once('-').map(|(_, e)| e.to_string()).unwrap_or(name);
-    let hostname = doc
-        .get("spec")
-        .and_then(|s| s.get("hostnames"))
-        .and_then(|h| h.get(0))
-        .and_then(|h| h.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+    let meta = doc.get("metadata");
+    let labels = meta.and_then(|m| m.get("labels"));
+    let annotations = meta.and_then(|m| m.get("annotations"));
+    let endpoint = get_str(labels, LABEL_ENDPOINT).unwrap_or_else(|| {
+        name.split_once('-')
+            .map(|(_, e)| e.to_string())
+            .unwrap_or_else(|| name.clone())
+    });
+    let host_value = get_str(annotations, LABEL_HOST_VALUE);
+    let (hostname, subdomain) = match get_str(annotations, LABEL_HOST_SOURCE).as_deref() {
+        Some("hostname") => (host_value, None),
+        Some("subdomain") => (None, host_value),
+        _ => {
+            // legacy fallback: effective host from spec.hostnames
+            let host = doc
+                .get("spec")
+                .and_then(|s| s.get("hostnames"))
+                .and_then(|h| h.get(0))
+                .and_then(|h| h.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            (host, None)
+        }
+    };
+    let path_prefix = get_str(annotations, LABEL_PATH_PREFIX).or_else(|| {
+        yaml_path(
+            doc,
+            &["spec", "rules", "0", "matches", "0", "path", "value"],
+        )
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+    });
     Some(Expose {
         endpoint,
-        via_balancer: get_str(Some(labels), "amispec.io/via-balancer").unwrap_or_default(),
-        scope: get_str(Some(labels), "amispec.io/scope").unwrap_or_else(|| "public".into()),
-        subdomain: None,
+        via_balancer: get_str(labels, LABEL_VIA_BALANCER).unwrap_or_default(),
+        scope: get_str(labels, LABEL_SCOPE).unwrap_or_else(|| "public".into()),
+        subdomain,
         hostname,
-        path_prefix: yaml_path(doc, &["spec", "rules", "0", "matches", "0", "path", "value"])
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        path_prefix,
+        security_policy: get_str(annotations, LABEL_SECURITY_POLICY)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .map(|v| amispec_schema::SecurityPolicy {
+                client_auth: v
+                    .get("clientAuth")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                cors_allowed_origins: v.get("corsAllowedOrigins").and_then(|x| x.as_array()).map(
+                    |a| {
+                        a.iter()
+                            .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                            .collect()
+                    },
+                ),
+                rate_limit_rps: v
+                    .get("rateLimitRps")
+                    .and_then(|x| x.as_u64())
+                    .map(|n| n as u32),
+                allow_anonymous: v.get("allowAnonymous").and_then(|x| x.as_bool()),
+            }),
     })
 }
 
@@ -530,8 +642,10 @@ fn external_from_cm(doc: &Value, annotations: Option<&Value>) -> Option<External
         transport: get_str(annotations, "amispec.io/transport"),
         region: get_str(data, "region"),
         bucket: get_str(data, "bucket"),
-        secret_ref: Some(get_str(annotations, "amispec.io/secret-ref")
-            .unwrap_or_else(|| "sops://unknown".into())),
+        secret_ref: Some(
+            get_str(annotations, "amispec.io/secret-ref")
+                .unwrap_or_else(|| "sops://unknown".into()),
+        ),
     })
 }
 

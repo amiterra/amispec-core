@@ -1,6 +1,6 @@
 //! Cross-crate tests: compile/decompile round-trip and AmiSpec fixtures.
 
-use amispec_compile::{compile, decompile, decompile_dir, Options, PassportIndex};
+use amispec_compile::{Options, PassportIndex, compile, decompile, decompile_dir};
 use amispec_schema::parse_topology;
 use std::path::{Path, PathBuf};
 
@@ -22,13 +22,31 @@ fn load_topology(name: &str) -> amispec_schema::TopologyBlueprint {
     parse_topology(&raw).expect("parse fixture")
 }
 
+/// Passport contracts for fixtures with `expose[]` (port resolution).
+fn fixture_passports() -> PassportIndex {
+    let raw = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { id: stateless-app, name: App, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints:
+    - { name: web, protocol: http, containerPort: 8080, role: ui, defaultScope: public }
+  provides: []
+  requires: {}
+"#;
+    let mut idx = PassportIndex::new();
+    idx.insert(amispec_compile::PassportSummary::from_passport_yaml(raw).unwrap());
+    idx
+}
+
 #[test]
 fn compile_minimal_topology_emits_stage_tree() {
     let topo = load_topology("topology-minimal.yaml");
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("compile-out");
     let result = compile(
         &topo,
-        &PassportIndex::default(),
+        &fixture_passports(),
         &Options {
             out_dir: out.clone(),
             provenance: true,
@@ -59,8 +77,8 @@ fn compile_minimal_topology_emits_stage_tree() {
 #[test]
 fn compile_is_deterministic() {
     let topo = load_topology("topology-minimal.yaml");
-    let a = compile(&topo, &PassportIndex::default(), &Options::dry()).unwrap();
-    let b = compile(&topo, &PassportIndex::default(), &Options::dry()).unwrap();
+    let a = compile(&topo, &fixture_passports(), &Options::dry()).unwrap();
+    let b = compile(&topo, &fixture_passports(), &Options::dry()).unwrap();
     assert_eq!(a.files.len(), b.files.len());
     for (x, y) in a.files.iter().zip(b.files.iter()) {
         assert_eq!(x.relative_path, y.relative_path);
@@ -75,7 +93,7 @@ fn roundtrip_compile_decompile_preserves_components() {
     let _ = std::fs::remove_dir_all(&out);
     compile(
         &topo,
-        &PassportIndex::default(),
+        &fixture_passports(),
         &Options {
             out_dir: out.clone(),
             provenance: true,
@@ -126,7 +144,7 @@ fn roundtrip_compile_decompile_preserves_components() {
 #[test]
 fn provenance_labels_present_on_workloads() {
     let topo = load_topology("topology-minimal.yaml");
-    let result = compile(&topo, &PassportIndex::default(), &Options::dry()).unwrap();
+    let result = compile(&topo, &fixture_passports(), &Options::dry()).unwrap();
     let apps = result
         .files
         .iter()
@@ -146,7 +164,7 @@ fn provenance_labels_present_on_workloads() {
 #[test]
 fn compiler_invariants_present() {
     let topo = load_topology("topology-minimal.yaml");
-    let result = compile(&topo, &PassportIndex::default(), &Options::dry()).unwrap();
+    let result = compile(&topo, &fixture_passports(), &Options::dry()).unwrap();
     let workloads = result
         .files
         .iter()
@@ -209,6 +227,14 @@ fn sidecar_pre_stop_only_for_standard_container() {
                 pre_stop_drain_delay_sec: Some(5),
             },
         )],
+        endpoints: vec![amispec_schema::PassportEndpoint {
+            name: "web".into(),
+            container_port: 8080,
+            protocol: Some("http".into()),
+            path: None,
+            default_scope: None,
+            default_subdomain: None,
+        }],
     });
     let topo = load_topology("topology-minimal.yaml");
     let result = compile(&topo, &idx, &Options::dry()).unwrap();
@@ -353,7 +379,11 @@ crossClusterLinks:
     let result = compile(
         &topo,
         &PassportIndex::default(),
-        &Options { out_dir: out.clone(), provenance: true, dry_run: false },
+        &Options {
+            out_dir: out.clone(),
+            provenance: true,
+            dry_run: false,
+        },
     )
     .unwrap();
     assert_eq!(result.cluster_ids.len(), 2);
@@ -361,19 +391,29 @@ crossClusterLinks:
     assert!(out.join("clusters/prod-eu/kustomization.yaml").exists());
     assert!(out.join("clusters/dr-eu/kustomization.yaml").exists());
     // CIDR formula uses distinct mesh ids
-    let net = std::fs::read_to_string(out.join("clusters/prod-eu/02-operators-and-networking/networking.yaml")).unwrap();
+    let net = std::fs::read_to_string(
+        out.join("clusters/prod-eu/02-operators-and-networking/networking.yaml"),
+    )
+    .unwrap();
     assert!(net.contains("10.101.0.0/16"));
-    let net2 = std::fs::read_to_string(out.join("clusters/dr-eu/02-operators-and-networking/networking.yaml")).unwrap();
+    let net2 = std::fs::read_to_string(
+        out.join("clusters/dr-eu/02-operators-and-networking/networking.yaml"),
+    )
+    .unwrap();
     assert!(net2.contains("10.102.0.0/16"));
     // cross-cluster meta
-    let meta = std::fs::read_to_string(out.join("clusters/_meta/cross-cluster-links.yaml")).unwrap();
+    let meta =
+        std::fs::read_to_string(out.join("clusters/_meta/cross-cluster-links.yaml")).unwrap();
     assert!(meta.contains("active-passive-replication"));
     // decompile keeps both clusters + link
     let report = decompile_dir(&out).unwrap();
     let rebuilt = report.topology.unwrap();
     assert_eq!(rebuilt.clusters.len(), 2);
     assert_eq!(rebuilt.cross_cluster_links.len(), 1);
-    assert_eq!(rebuilt.cross_cluster_links[0].relation_type, "active-passive-replication");
+    assert_eq!(
+        rebuilt.cross_cluster_links[0].relation_type,
+        "active-passive-replication"
+    );
 }
 
 #[test]
@@ -409,8 +449,16 @@ clusters:
 "#;
     let topo = parse_topology(yaml).unwrap();
     let result = compile(&topo, &PassportIndex::default(), &Options::dry()).unwrap();
-    let stateful = result.files.iter().find(|f| f.relative_path.contains("03-stateful")).unwrap();
-    let apps = result.files.iter().find(|f| f.relative_path.contains("workloads.yaml")).unwrap();
+    let stateful = result
+        .files
+        .iter()
+        .find(|f| f.relative_path.contains("03-stateful"))
+        .unwrap();
+    let apps = result
+        .files
+        .iter()
+        .find(|f| f.relative_path.contains("workloads.yaml"))
+        .unwrap();
     assert!(stateful.contents.contains("StatefulSet"));
     assert!(stateful.contents.contains("pg"));
     assert!(apps.contents.contains("Deployment"));
@@ -445,12 +493,20 @@ fn write_files_creates_tree() {
     let _ = std::fs::remove_dir_all(&out);
     let result = compile(
         &topo,
-        &PassportIndex::default(),
-        &Options { out_dir: out.clone(), provenance: true, dry_run: false },
+        &fixture_passports(),
+        &Options {
+            out_dir: out.clone(),
+            provenance: true,
+            dry_run: false,
+        },
     )
     .unwrap();
     assert!(result.files.len() >= 15);
     for f in &result.files {
-        assert!(out.join(&f.relative_path).exists(), "missing {}", f.relative_path);
+        assert!(
+            out.join(&f.relative_path).exists(),
+            "missing {}",
+            f.relative_path
+        );
     }
 }

@@ -12,6 +12,7 @@ name = "amispec_validate"
 path = "src/lib.rs"
 
 [dependencies]
+amispec-schema = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }

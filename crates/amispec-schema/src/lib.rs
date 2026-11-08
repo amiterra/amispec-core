@@ -6,7 +6,7 @@
 //! `amispec-validate` for full structural checks against the CUE schemas.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// AmiSpec standard version this crate targets (see `amispec` repo).
 pub const AMISPEC_STANDARD_VERSION: &str = "1.0.0";
@@ -49,12 +49,7 @@ pub struct DocumentHeader {
 }
 
 /// Topology mode names (enum in the spec).
-pub const TOPOLOGY_MODES: &[&str] = &[
-    "standalone",
-    "degraded-ha",
-    "strict-ha",
-    "sharded-cluster",
-];
+pub const TOPOLOGY_MODES: &[&str] = &["standalone", "degraded-ha", "strict-ha", "sharded-cluster"];
 
 /// Passport categories (enum in the spec).
 pub const PASSPORT_CATEGORIES: &[&str] = &[
@@ -195,6 +190,9 @@ pub struct Cluster {
     pub id: String,
     pub name: String,
     pub domain: String,
+    /// k3s release channel pin (spec default `v1.37`).
+    #[serde(default, rename = "k3sChannel")]
+    pub k3s_channel: Option<String>,
     #[serde(default)]
     pub security: Option<ClusterSecurity>,
     pub cni: CniConfig,
@@ -283,6 +281,15 @@ pub struct Disc {
     pub size_gb: u64,
 }
 
+/// User-level workload override (`workloadOverride`) — only when the passport
+/// allows it. Image/command overrides are the compile-time contract; other
+/// fields round-trip through the user-spec delta.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WorkloadOverride {
+    #[serde(default)]
+    pub image: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ComponentInstance {
     pub id: String,
@@ -306,6 +313,8 @@ pub struct ComponentInstance {
     pub bindings: Vec<Binding>,
     #[serde(default)]
     pub expose: Vec<Expose>,
+    #[serde(default, rename = "workloadOverride")]
+    pub workload_override: Option<WorkloadOverride>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -372,18 +381,39 @@ pub struct Binding {
     pub outbox_source_requirement: Option<String>,
 }
 
+/// Edge security policy on an `expose[]` entry.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SecurityPolicy {
+    /// `none` | `oidc` | `mtls` (spec default `none`).
+    #[serde(default, rename = "clientAuth")]
+    pub client_auth: Option<String>,
+    #[serde(default, rename = "corsAllowedOrigins")]
+    pub cors_allowed_origins: Option<Vec<String>>,
+    #[serde(default, rename = "rateLimitRps")]
+    pub rate_limit_rps: Option<u32>,
+    /// Explicitly acknowledge `scope: protected` without client authentication.
+    #[serde(default, rename = "allowAnonymous")]
+    pub allow_anonymous: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Expose {
+    /// Named `interfaces.endpoints[]` entry of the component passport;
+    /// its `containerPort` becomes the route backend port (portless ADR 0009).
     pub endpoint: String,
     #[serde(rename = "viaBalancer")]
     pub via_balancer: String,
     pub scope: String,
+    /// Expands to FQDN `<subdomain>.<cluster.domain>`.
     #[serde(default)]
     pub subdomain: Option<String>,
+    /// Apex / external domain, used as-is (takes precedence over `subdomain`).
     #[serde(default)]
     pub hostname: Option<String>,
     #[serde(default, rename = "pathPrefix")]
     pub path_prefix: Option<String>,
+    #[serde(default, rename = "securityPolicy")]
+    pub security_policy: Option<SecurityPolicy>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -405,6 +435,186 @@ pub struct LoadBalancer {
     pub http3_quic: Option<bool>,
     #[serde(default)]
     pub tls: Option<String>,
+}
+
+/// Inbound endpoint contract from `interfaces.endpoints[]` of a ComponentPassport.
+///
+/// `expose[].endpoint` names one of these entries; its `containerPort` becomes
+/// the compiled route backend port (portless composition, ADR 0009).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PassportEndpoint {
+    pub name: String,
+    #[serde(rename = "containerPort")]
+    pub container_port: u16,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default, rename = "defaultScope")]
+    pub default_scope: Option<String>,
+    #[serde(default, rename = "defaultSubdomain")]
+    pub default_subdomain: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PassportInterfacesView {
+    #[serde(default)]
+    endpoints: Vec<PassportEndpoint>,
+    #[serde(default)]
+    provides: Vec<PassportProvideView>,
+    #[serde(default)]
+    requires: BTreeMap<String, PassportRequireView>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PassportProvideView {
+    slot: String,
+    capability: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PassportRequireView {
+    capability: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PassportContractView {
+    #[serde(default)]
+    interfaces: Option<PassportInterfacesView>,
+}
+
+/// Extract `interfaces.endpoints[]` contracts from passport YAML text.
+///
+/// Unknown passport fields are ignored (the full passport schema is validated
+/// by `amispec-validate`); this projection only reads the endpoint contract.
+pub fn parse_passport_endpoints(raw: &str) -> Result<Vec<PassportEndpoint>, SchemaError> {
+    let view: PassportContractView =
+        serde_yaml::from_str(raw).map_err(|e| SchemaError::Parse(e.to_string()))?;
+    Ok(view.interfaces.map(|i| i.endpoints).unwrap_or_default())
+}
+
+/// `provides`/`requires` slot contract of a ComponentPassport — the graph
+/// edges of composition (Design Doc 0026 §1.2: dependency closure of
+/// `requires` when assembling a topology from the catalog).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PassportSlots {
+    pub id: String,
+    /// Outgoing slots: slot name → capability.
+    pub provides: BTreeMap<String, String>,
+    /// Incoming requirements: slot name → capability.
+    pub requires: BTreeMap<String, String>,
+}
+
+/// Extract the slot contract (`interfaces.provides` / `interfaces.requires`)
+/// and passport identity from passport YAML text.
+pub fn parse_passport_slots(raw: &str) -> Result<PassportSlots, SchemaError> {
+    let view: PassportContractView =
+        serde_yaml::from_str(raw).map_err(|e| SchemaError::Parse(e.to_string()))?;
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(raw).map_err(|e| SchemaError::Parse(e.to_string()))?;
+    let id = doc
+        .get("metadata")
+        .and_then(|m| m.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| SchemaError::Parse("passport: metadata.id is required".into()))?
+        .to_string();
+    let mut slots = PassportSlots {
+        id,
+        ..Default::default()
+    };
+    if let Some(ifaces) = view.interfaces {
+        for p in ifaces.provides {
+            slots.provides.insert(p.slot, p.capability);
+        }
+        for (slot, r) in ifaces.requires {
+            slots.requires.insert(slot, r.capability);
+        }
+    }
+    Ok(slots)
+}
+
+/// Deterministic provider choice for a capability within a catalog.
+///
+/// When several catalog passports provide the same capability the
+/// lexicographically smallest id wins (stable across doors); alternatives are
+/// reported so a UI can offer a picker instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosureResolution {
+    /// Selected + transitively required passport ids.
+    pub resolved: BTreeSet<String>,
+    /// capability → chosen provider passport id.
+    pub providers: BTreeMap<String, String>,
+    /// capability → all provider ids (sorted) for UI pickers.
+    pub alternatives: BTreeMap<String, Vec<String>>,
+    /// Requirements no catalog passport can provide (from, slot, capability).
+    pub unresolved: Vec<(String, String, String)>,
+}
+
+/// Compute the transitive `requires` closure of a passport selection over a
+/// catalog (Design Doc 0026 §1.2/§3.1 — "pick and apply" must be an honest,
+/// validated graph closure, not magic).
+pub fn dependency_closure(
+    catalog: &BTreeMap<String, PassportSlots>,
+    selected: &[String],
+) -> ClosureResolution {
+    let mut resolved: BTreeSet<String> = BTreeSet::new();
+    let mut providers: BTreeMap<String, String> = BTreeMap::new();
+    let mut alternatives: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unresolved: Vec<(String, String, String)> = Vec::new();
+
+    // capability → providing passport ids (sorted → deterministic choice)
+    let mut by_capability: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (id, slots) in catalog {
+        for cap in slots.provides.values() {
+            by_capability
+                .entry(cap.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    for ids in by_capability.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+
+    // BFS over required capabilities; queue is sorted for determinism.
+    let mut queue: Vec<String> = selected.to_vec();
+    queue.sort();
+    queue.dedup();
+    while let Some(id) = queue.first().cloned() {
+        queue.remove(0);
+        if !resolved.insert(id.clone()) {
+            continue;
+        }
+        let Some(slots) = catalog.get(&id) else {
+            // selected passport unknown to the catalog — surfaced as unresolved
+            unresolved.push((
+                id.clone(),
+                String::from("<catalog>"),
+                String::from("<missing>"),
+            ));
+            continue;
+        };
+        for (_slot, cap) in &slots.requires {
+            let Some(ids) = by_capability.get(cap) else {
+                unresolved.push((id.clone(), _slot.clone(), cap.clone()));
+                continue;
+            };
+            let chosen = ids[0].clone();
+            alternatives.insert(cap.clone(), ids.clone());
+            providers.insert(cap.clone(), chosen.clone());
+            if !resolved.contains(&chosen) {
+                queue.push(chosen.clone());
+            }
+        }
+    }
+
+    ClosureResolution {
+        resolved,
+        providers,
+        alternatives,
+        unresolved,
+    }
 }
 
 /// Document identity after classification.
@@ -468,5 +678,116 @@ mod tests {
             Some(DocumentKind::ComponentPassport)
         );
         assert_eq!(DocumentKind::from_kind_str("Nope"), None);
+    }
+
+    const SLOTS_DOC: &str = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { id: youtrack, name: YouTrack, version: "1.0.0", passportRev: 3 }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints: []
+  provides: []
+  requires:
+    edge: { capability: http-l7-gateway }
+    database: { capability: postgres-sql }
+"#;
+
+    const BALANCER_DOC: &str = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { id: balancer-cilium-l7, name: Balancer, version: "1.0.0", passportRev: 1 }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints: []
+  provides:
+    - { slot: l7, capability: http-l7-gateway }
+  requires: {}
+"#;
+
+    const PG_DOC: &str = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { id: postgresql, name: PG, version: "18.0.0", passportRev: 6 }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints: []
+  provides:
+    - { slot: sql-cluster, capability: postgres-sql }
+  requires: {}
+"#;
+
+    #[test]
+    fn parses_slot_contract() {
+        let slots = parse_passport_slots(SLOTS_DOC).unwrap();
+        assert_eq!(slots.id, "youtrack");
+        assert!(slots.provides.is_empty());
+        assert_eq!(
+            slots.requires.get("edge").map(|s| s.as_str()),
+            Some("http-l7-gateway")
+        );
+        assert_eq!(
+            slots.requires.get("database").map(|s| s.as_str()),
+            Some("postgres-sql")
+        );
+    }
+
+    fn catalog() -> BTreeMap<String, PassportSlots> {
+        [SLOTS_DOC, BALANCER_DOC, PG_DOC]
+            .iter()
+            .map(|raw| {
+                let s = parse_passport_slots(raw).unwrap();
+                (s.id.clone(), s)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn closure_pulls_transitive_requirements() {
+        let res = dependency_closure(&catalog(), &[String::from("youtrack")]);
+        assert_eq!(
+            res.resolved,
+            ["youtrack", "balancer-cilium-l7", "postgresql"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            res.providers.get("http-l7-gateway").map(|s| s.as_str()),
+            Some("balancer-cilium-l7")
+        );
+        assert!(res.unresolved.is_empty());
+    }
+
+    #[test]
+    fn closure_reports_unresolvable_capabilities() {
+        let mut cat = catalog();
+        cat.remove("postgresql");
+        let res = dependency_closure(&cat, &[String::from("youtrack")]);
+        assert_eq!(res.unresolved.len(), 1);
+        assert_eq!(
+            res.unresolved[0],
+            ("youtrack".into(), "database".into(), "postgres-sql".into())
+        );
+    }
+
+    #[test]
+    fn closure_choice_is_deterministic_with_alternatives() {
+        let mut cat = catalog();
+        let extra = BALANCER_DOC.replace("balancer-cilium-l7", "aaa-first");
+        cat.insert("aaa-first".into(), parse_passport_slots(&extra).unwrap());
+        let res = dependency_closure(&cat, &[String::from("youtrack")]);
+        assert_eq!(
+            res.providers.get("http-l7-gateway").map(|s| s.as_str()),
+            Some("aaa-first"),
+            "lexicographically smallest provider wins"
+        );
+        assert_eq!(
+            res.alternatives.get("http-l7-gateway"),
+            Some(&vec![
+                "aaa-first".to_string(),
+                "balancer-cilium-l7".to_string()
+            ])
+        );
     }
 }

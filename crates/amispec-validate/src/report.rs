@@ -17,7 +17,11 @@ pub struct Finding {
 }
 
 impl Finding {
-    pub fn error(path: impl Into<String>, rule: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn error(
+        path: impl Into<String>,
+        rule: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             severity: Severity::Error,
             path: path.into(),
@@ -26,7 +30,11 @@ impl Finding {
         }
     }
 
-    pub fn warning(path: impl Into<String>, rule: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn warning(
+        path: impl Into<String>,
+        rule: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             severity: Severity::Warning,
             path: path.into(),
@@ -60,7 +68,9 @@ impl Report {
     }
 
     pub fn errors(&self) -> impl Iterator<Item = &Finding> {
-        self.findings.iter().filter(|f| f.severity == Severity::Error)
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
     }
 
     pub fn warnings(&self) -> impl Iterator<Item = &Finding> {

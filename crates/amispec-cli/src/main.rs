@@ -5,8 +5,8 @@
 
 use amispec_compile::compile;
 use amispec_schema::AMISPEC_STANDARD_VERSION;
-use amispec_validate::{validate_file, Options as ValidateOptions};
-use anyhow::{bail, Context, Result};
+use amispec_validate::{Options as ValidateOptions, validate_file};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -53,6 +53,9 @@ enum Command {
         /// Compute artifacts without writing
         #[arg(long)]
         dry_run: bool,
+        /// Passport files or directories (endpoint contracts resolve expose ports)
+        #[arg(long = "passport")]
+        passports: Vec<PathBuf>,
     },
     /// Reverse-decompile a FluxCD tree (with AmiSpec provenance) to topology.yaml
     Decompile {
@@ -122,16 +125,21 @@ fn main() -> Result<()> {
             input,
             out,
             dry_run,
+            passports,
         } => {
             let raw = std::fs::read_to_string(&input)
                 .with_context(|| format!("read {}", input.display()))?;
             let topo = amispec_schema::parse_topology(&raw).context("parse topology")?;
+            let index = load_passports(&passports)?;
             let opts = amispec_compile::Options {
                 out_dir: out.clone(),
                 provenance: true,
                 dry_run,
             };
-            let result = compile(&topo, &amispec_compile::PassportIndex::default(), &opts).context("compile")?;
+            let result = compile(&topo, &index, &opts).context("compile")?;
+            for w in &result.warnings {
+                eprintln!("warn: {w}");
+            }
             println!(
                 "compiled cluster(s) {:?} component(s) {:?} → {} artifact(s) into {}",
                 result.cluster_ids,
@@ -173,16 +181,27 @@ fn collect_yaml(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Load passport endpoint contracts (files or directories of YAML).
+fn load_passports(paths: &[PathBuf]) -> Result<amispec_compile::PassportIndex> {
+    let mut index = amispec_compile::PassportIndex::new();
+    for f in collect_yaml(paths)? {
+        let raw = std::fs::read_to_string(&f)
+            .with_context(|| format!("read passport {}", f.display()))?;
+        let summary = amispec_compile::PassportSummary::from_passport_yaml(&raw)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("parse passport {}", f.display()))?;
+        index.insert(summary);
+    }
+    Ok(index)
+}
+
 fn print_report(report: &amispec_validate::Report, strict: bool) {
     let status = if report.is_ok() && !(strict && !report.findings.is_empty()) {
         "PASS"
     } else {
         "FAIL"
     };
-    let kind = report
-        .kind
-        .map(|k| k.as_str())
-        .unwrap_or("?");
+    let kind = report.kind.map(|k| k.as_str()).unwrap_or("?");
     println!("{status} {} ({kind})", report.source);
     for f in &report.findings {
         let sev = match f.severity {

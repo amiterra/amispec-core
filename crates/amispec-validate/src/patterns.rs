@@ -15,7 +15,10 @@ pub fn is_sha256_digest(s: &str) -> bool {
     let Some(hex) = s.strip_prefix("sha256:") else {
         return false;
     };
-    hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// `accentColor` — `^#[0-9a-fA-F]{6}$`

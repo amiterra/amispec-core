@@ -1,0 +1,294 @@
+=== clusters/local/01-node-tuning/crd.yaml ===
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    amispec.io/stage: 01-node-tuning
+  name: nodetuningprofiles.tuning.amispec.io
+spec:
+  group: tuning.amispec.io
+  names:
+    kind: NodeTuningProfile
+    listKind: NodeTuningProfileList
+    plural: nodetuningprofiles
+    singular: nodetuningprofile
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+    served: true
+    storage: true
+=== clusters/local/01-node-tuning/profiles.yaml ===
+apiVersion: tuning.amispec.io/v1alpha1
+kind: NodeTuningProfile
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/node-id: n1
+    amispec.io/stage: 01-node-tuning
+  name: local-n1
+spec:
+  disks: []
+  failureDomainZone: null
+  hardware:
+    arch: amd64
+    cpuCores: 2.0
+    lvmSnapshotReservePercent: 10
+    memoryMb: 4096
+    systemDiskReservedGb: 40
+    systemReservedMb: 1280
+  nodeSelector:
+    kubernetes.io/hostname: n1
+  role: control-plane-worker
+=== clusters/local/01-node-tuning/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- crd.yaml
+- profiles.yaml
+=== clusters/local/02-operators-and-networking/networking.yaml ===
+apiVersion: v1
+data:
+  clusterMeshId: '1'
+  engine: cilium-ebpf
+  fqdnCacheMinTtlSec: '3600'
+  mtuDiscoveryAndMssClamp: 'true'
+  podCIDR: 10.101.0.0/16
+  serviceCIDR: 10.201.0.0/16
+  wireguardEncryption: 'true'
+kind: ConfigMap
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 02-operators-and-networking
+  name: local-cni
+  namespace: kube-system
+=== clusters/local/02-operators-and-networking/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- networking.yaml
+=== clusters/local/03-stateful-clusters/stateful.yaml ===
+[]
+=== clusters/local/03-stateful-clusters/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- stateful.yaml
+=== clusters/local/04a-provisioners-day2/jobs.yaml ===
+[]
+=== clusters/local/04a-provisioners-day2/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- jobs.yaml
+=== clusters/local/04b-app-migrations-expand/jobs.yaml ===
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/stage: 04b-app-migrations-expand
+  name: migrate-expand-web-a1897b25
+  namespace: default
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      containers:
+      - command:
+        - sh
+        - -c
+        - echo expand-schema && exit 0
+        image: busybox:1.36
+        name: migrate
+      restartPolicy: Never
+  ttlSecondsAfterFinished: 86400
+=== clusters/local/04b-app-migrations-expand/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- jobs.yaml
+=== clusters/local/05-applications/namespaces.yaml ===
+[]
+=== clusters/local/05-applications/workloads.yaml ===
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
+    reloader.stakater.com/auto: 'true'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+    app.kubernetes.io/instance: web
+    app.kubernetes.io/name: web
+  name: web
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      annotations:
+        amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
+        reloader.stakater.com/auto: 'true'
+      labels:
+        amispec.io/cluster-id: local
+        amispec.io/component-id: web
+        amispec.io/passport: stateless-app.1.0.0-rev1
+        amispec.io/stage: 05-applications
+        app.kubernetes.io/instance: web
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+      - image: stateless-app:1.0.0
+        name: app
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: '1'
+            memory: 256Mi
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+      terminationGracePeriodSeconds: 65
+=== clusters/local/05-applications/pdb.yaml ===
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+  name: web-pdb
+  namespace: default
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+=== clusters/local/05-applications/hpa.yaml ===
+[]
+=== clusters/local/05-applications/secrets.yaml ===
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+  name: web-bindings
+  namespace: default
+stringData:
+  _amispec.component: web
+  _amispec.passport: stateless-app.1.0.0-rev1
+type: Opaque
+=== clusters/local/05-applications/routes.yaml ===
+[]
+=== clusters/local/05-applications/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- namespaces.yaml
+- workloads.yaml
+- pdb.yaml
+- hpa.yaml
+- secrets.yaml
+- routes.yaml
+=== clusters/local/06-zero-trust-and-observability/netpols.yaml ===
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: local-kube-dns-guard
+  namespace: kube-system
+spec:
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:k8s-app: kube-dns
+    toPorts:
+    - ports:
+      - port: '53'
+        protocol: ANY
+  endpointSelector: {}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: local-web-egress
+  namespace: default
+spec:
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:k8s-app: kube-dns
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+=== clusters/local/06-zero-trust-and-observability/observability.yaml ===
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: web-metrics
+  namespace: default
+spec:
+  ports:
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  selector:
+    app.kubernetes.io/name: web
+=== clusters/local/06-zero-trust-and-observability/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- netpols.yaml
+- observability.yaml
+=== clusters/local/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- flux-system
+- 01-node-tuning
+- 02-operators-and-networking
+- 03-stateful-clusters
+- 04a-provisioners-day2
+- 04b-app-migrations-expand
+- 05-applications
+- 06-zero-trust-and-observability
+=== clusters/_meta/external-resources.yaml ===
+[]
+=== clusters/_meta/cross-cluster-links.yaml ===
+[]
+=== clusters/_meta/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- external-resources.yaml
+- cross-cluster-links.yaml

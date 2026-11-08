@@ -1,0 +1,1244 @@
+=== clusters/local/01-node-tuning/crd.yaml ===
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    amispec.io/stage: 01-node-tuning
+  name: nodetuningprofiles.tuning.amispec.io
+spec:
+  group: tuning.amispec.io
+  names:
+    kind: NodeTuningProfile
+    listKind: NodeTuningProfileList
+    plural: nodetuningprofiles
+    singular: nodetuningprofile
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+    served: true
+    storage: true
+=== clusters/local/01-node-tuning/profiles.yaml ===
+apiVersion: tuning.amispec.io/v1alpha1
+kind: NodeTuningProfile
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/node-id: n1
+    amispec.io/stage: 01-node-tuning
+  name: local-n1
+spec:
+  disks: []
+  failureDomainZone: null
+  hardware:
+    arch: amd64
+    cpuCores: 2.0
+    lvmSnapshotReservePercent: 10
+    memoryMb: 4096
+    systemDiskReservedGb: 40
+    systemReservedMb: 1280
+  nodeSelector:
+    kubernetes.io/hostname: n1
+  role: control-plane-worker
+=== clusters/local/01-node-tuning/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- crd.yaml
+- profiles.yaml
+=== clusters/local/02-operators-and-networking/networking.yaml ===
+apiVersion: v1
+data:
+  clusterMeshId: '1'
+  engine: cilium-ebpf
+  fqdnCacheMinTtlSec: '3600'
+  mtuDiscoveryAndMssClamp: 'true'
+  podCIDR: 10.101.0.0/16
+  serviceCIDR: 10.201.0.0/16
+  wireguardEncryption: 'true'
+kind: ConfigMap
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 02-operators-and-networking
+  name: local-cni
+  namespace: kube-system
+=== clusters/local/02-operators-and-networking/balancer-activation.yaml ===
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/exposure: 'true'
+    amispec.io/stage: 02-operators-and-networking
+  name: cilium
+  namespace: kube-system
+spec:
+  valuesContent: |
+    envoy:
+      enabled: true
+    rollOutCiliumPods: true
+    operator:
+      replicas: 1
+      tolerations:
+        - operator: Exists
+      image:
+        useDigest: false
+        digest: ""
+      rollOutPods: true
+    bpf:
+      masquerade: true
+      hostRouting: true
+      tproxy: true
+    l2announcements:
+      enabled: true
+    gatewayAPI:
+      enabled: true
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 02-operators-and-networking
+  name: cert-manager
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 02-operators-and-networking
+  name: jetstack
+  namespace: cert-manager
+spec:
+  interval: 1h
+  url: https://charts.jetstack.io
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 02-operators-and-networking
+  name: cert-manager
+  namespace: cert-manager
+spec:
+  chart:
+    spec:
+      chart: cert-manager
+      sourceRef:
+        kind: HelmRepository
+        name: jetstack
+        namespace: cert-manager
+      version: v1.16.2
+  interval: 1h
+  values:
+    installCRDs: true
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 02-operators-and-networking
+  name: amispec-l2
+spec:
+  loadBalancerIPs: true
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  annotations:
+    amispec.io/lb-provider: cilium-envoy
+    amispec.io/tls: letsencrypt-http01
+    amispec.io/tls-mode-resolved: letsencrypt-http01
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: main-l7
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/stage: 02-operators-and-networking
+  name: main-l7
+spec:
+  acme:
+    privateKeySecretRef:
+      name: main-l7-acme-account
+    server: https://acme-v02.api.letsencrypt.org/directory
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs:
+          - kind: Gateway
+            name: main-l7
+            namespace: flux-system
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  annotations:
+    amispec.io/lb-provider: cilium-envoy
+    amispec.io/tls: letsencrypt-http01
+    amispec.io/tls-mode-resolved: letsencrypt-http01
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: main-l7
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/stage: 02-operators-and-networking
+  name: main-l7-admin-example-io
+  namespace: flux-system
+spec:
+  dnsNames:
+  - admin.example.io
+  issuerRef:
+    kind: ClusterIssuer
+    name: main-l7
+  secretName: main-l7-admin-example-io-tls
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  annotations:
+    amispec.io/lb-provider: cilium-envoy
+    amispec.io/tls: letsencrypt-http01
+    amispec.io/tls-mode-resolved: letsencrypt-http01
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: main-l7
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/stage: 02-operators-and-networking
+  name: main-l7-example-io
+  namespace: flux-system
+spec:
+  dnsNames:
+  - example.io
+  issuerRef:
+    kind: ClusterIssuer
+    name: main-l7
+  secretName: main-l7-example-io-tls
+---
+apiVersion: v1
+data:
+  checklist: |-
+    - populate CiliumLoadBalancerIPPool address blocks from floatingIpRef via Day-2 node inventory (Design Doc 0022)
+    - configure BGP peering on nodes (Design Doc 0022)
+    - confirm Proxy Protocol v2 termination at the upstream path when enabled
+  floatingIpRef: fip-01
+  forwardingMode: ebpf-dsr-maglev
+kind: ConfigMap
+metadata:
+  annotations:
+    amispec.io/floating-ip-ref: fip-01
+    amispec.io/forwarding-mode: ebpf-dsr-maglev
+    amispec.io/lb-provider: cilium-l4-bgp
+    amispec.io/proxy-protocol-v2: 'true'
+    amispec.io/tls-mode-resolved: none
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: mqtt-l4
+    amispec.io/lb-layer: l4-balancer
+    amispec.io/stage: 02-operators-and-networking
+  name: mqtt-l4-l4-prereqs
+  namespace: flux-system
+=== clusters/local/02-operators-and-networking/gateways.yaml ===
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    amispec.io/crd-vendored: cilium chart ships no CRDs and cilium-operator does not install this one; vendored so Flux dry-run can pass
+  labels:
+    amispec.io/stage: 02-operators-and-networking
+  name: ciliumgatewayclassconfigs.cilium.io
+spec:
+  group: cilium.io
+  names:
+    categories:
+    - cilium
+    kind: CiliumGatewayClassConfig
+    listKind: CiliumGatewayClassConfigList
+    plural: ciliumgatewayclassconfigs
+    shortNames:
+    - cgcc
+    singular: ciliumgatewayclassconfig
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .spec.description
+      name: Description
+      priority: 1
+      type: string
+    name: v2alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CiliumGatewayClassConfig is a Kubernetes third-party resource which
+          is used to configure Gateways owned by GatewayClass.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec is a human-readable of a GatewayClass configuration.
+            properties:
+              description:
+                description: Description helps describe a GatewayClass configuration with more details.
+                maxLength: 64
+                type: string
+              envoy:
+                description: |-
+                  Envoy specifies proxy configuration options.
+                  These settings control Envoy-specific behavior that is not part of the Gateway API standard.
+                properties:
+                  serverHeaderTransformation:
+                    default: OVERWRITE
+                    description: |-
+                      ServerHeaderTransformation controls the HTTP "Server" response header.
+                      Defaults to OVERWRITE.
+                    enum:
+                    - OVERWRITE
+                    - APPEND_IF_ABSENT
+                    - PASS_THROUGH
+                    type: string
+                type: object
+              httpOptions:
+                description: HTTPOptions specifies HTTP connection manager options.
+                properties:
+                  grpcWebTranslation:
+                    description: GRPCWebTranslation controls Envoy's gRPC-web to gRPC request translation.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled controls Envoy's gRPC-web to gRPC request translation.
+                        type: boolean
+                    type: object
+                type: object
+              service:
+                description: |-
+                  Service specifies the configuration for the generated Service.
+                  Note that not all fields from upstream Service.Spec are supported
+                properties:
+                  allocateLoadBalancerNodePorts:
+                    description: Sets the Service.Spec.AllocateLoadBalancerNodePorts in generated Service objects to the given value.
+                    type: boolean
+                  externalTrafficPolicy:
+                    default: Cluster
+                    description: Sets the Service.Spec.ExternalTrafficPolicy in generated Service objects to the given value.
+                    type: string
+                  ipFamilies:
+                    description: Sets the Service.Spec.IPFamilies in generated Service objects to the given value.
+                    items:
+                      description: |-
+                        IPFamily represents the IP Family (IPv4 or IPv6). This type is used
+                        to express the family of an IP expressed by a type (e.g. service.spec.ipFamilies).
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  ipFamilyPolicy:
+                    description: Sets the Service.Spec.IPFamilyPolicy in generated Service objects to the given value.
+                    type: string
+                  loadBalancerClass:
+                    description: Sets the Service.Spec.LoadBalancerClass in generated Service objects to the given value.
+                    type: string
+                  loadBalancerSourceRanges:
+                    description: Sets the Service.Spec.LoadBalancerSourceRanges in generated Service objects to the given value.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  loadBalancerSourceRangesPolicy:
+                    default: Allow
+                    description: |-
+                      LoadBalancerSourceRangesPolicy defines the policy for the LoadBalancerSourceRanges if the incoming traffic
+                      is allowed or denied.
+                    enum:
+                    - Allow
+                    - Deny
+                    type: string
+                  trafficDistribution:
+                    description: Sets the Service.Spec.TrafficDistribution in generated Service objects to the given value.
+                    type: string
+                  type:
+                    default: LoadBalancer
+                    description: |-
+                      Sets the Service.Spec.Type in generated Service objects to the given value.
+                      Only LoadBalancer and NodePort are supported.
+                    enum:
+                    - LoadBalancer
+                    - NodePort
+                    type: string
+                type: object
+              telemetry:
+                description: |-
+                  Telemetry specifies observability options for Gateways using this
+                  GatewayClass configuration.
+                properties:
+                  accessLogs:
+                    description: |-
+                      AccessLogs configures Envoy access logging for generated Gateway
+                      listeners.
+                    items:
+                      description: |-
+                        AccessLogs defines an Envoy access log configuration, including its output
+                        format and the generated proxy components that should emit it.
+                        Access logs are currently written to Envoy stdout.
+                      properties:
+                        format:
+                          description: Format specifies the access log output format.
+                          enum:
+                          - JSON
+                          - Text
+                          type: string
+                        json:
+                          additionalProperties:
+                            type: string
+                          default:
+                            authority: '%REQUEST_HEADER(:AUTHORITY)%'
+                            bytes_received: '%BYTES_RECEIVED%'
+                            bytes_sent: '%BYTES_SENT%'
+                            duration: '%DURATION%'
+                            method: '%REQUEST_HEADER(:METHOD)%'
+                            path: '%REQUEST_HEADER(X-ENVOY-ORIGINAL-PATH?:PATH)%'
+                            protocol: '%PROTOCOL%'
+                            request_id: '%REQUEST_HEADER(X-REQUEST-ID)%'
+                            response_code: '%RESPONSE_CODE%'
+                            response_flags: '%RESPONSE_FLAGS%'
+                            start_time: '%START_TIME%'
+                            upstream_host: '%UPSTREAM_HOST%'
+                            upstream_service_time: '%RESPONSE_HEADER(X-ENVOY-UPSTREAM-SERVICE-TIME)%'
+                            user_agent: '%REQUEST_HEADER(USER-AGENT)%'
+                            x_forwarded_for: '%REQUEST_HEADER(X-FORWARDED-FOR)%'
+                          description: |-
+                            JSON maps access log field names to Envoy command operators.
+                            It is used when Format is "JSON".
+                            For available format specifiers, see the Envoy documentation:
+                            - https://www.envoyproxy.io/docs/envoy/latest/configuration/observability/access_log/usage
+                            Note: Always refer to the documentation matching the specific Envoy version you are running.
+                            The following Cilium-specific formatters are also supported:
+                            - %CILIUM_GATEWAY_NAME% -- replaced with the Gateway resource name.
+                            - %CILIUM_GATEWAY_NAMESPACE% -- replaced with the Gateway resource namespace.
+                          maxProperties: 64
+                          minProperties: 1
+                          type: object
+                        targets:
+                          default:
+                          - HTTP
+                          description: |-
+                            Targets specifies the generated Envoy proxy components where access logs
+                            are emitted. If omitted, access logs are emitted for HTTP traffic only.
+                            HTTP targets Envoy HTTP connection managers. TCP targets Envoy TCP proxies,
+                            including TLS passthrough.
+                          items:
+                            description: AccessLogsTarget specifies where access logs are emitted.
+                            enum:
+                            - HTTP
+                            - TCP
+                            type: string
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                        text:
+                          default: '[%START_TIME%] "%REQUEST_HEADER(:METHOD)% %REQUEST_HEADER(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESPONSE_HEADER(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQUEST_HEADER(X-FORWARDED-FOR)%" "%REQUEST_HEADER(USER-AGENT)%" "%REQUEST_HEADER(X-REQUEST-ID)%" "%REQUEST_HEADER(:AUTHORITY)%" "%UPSTREAM_HOST%"'
+                          description: |-
+                            Text specifies the Envoy access log format string.
+                            It is used when Format is "Text".
+                            For available format specifiers, see the Envoy documentation:
+                            - https://www.envoyproxy.io/docs/envoy/latest/configuration/observability/access_log/usage
+                            Note: Always refer to the documentation matching the specific Envoy version you are running.
+                            The following Cilium-specific formatters are also supported:
+                            - %CILIUM_GATEWAY_NAME% -- replaced with the Gateway resource name.
+                            - %CILIUM_GATEWAY_NAMESPACE% -- replaced with the Gateway resource namespace.
+                          maxLength: 4096
+                          minLength: 1
+                          type: string
+                      required:
+                      - format
+                      type: object
+                    maxItems: 8
+                    minItems: 1
+                    type: array
+                type: object
+            type: object
+          status:
+            description: Status is the status of the policy.
+            properties:
+              conditions:
+                description: Current service state
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - 'True'
+                      - 'False'
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - metadata
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumGatewayClassConfig
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: main-l7
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/stage: 02-operators-and-networking
+  name: main-l7-config
+  namespace: flux-system
+spec:
+  service:
+    allocateLoadBalancerNodePorts: false
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  annotations:
+    amispec.io/lb-provider: cilium-envoy
+    amispec.io/tls: letsencrypt-http01
+    amispec.io/tls-mode-resolved: letsencrypt-http01
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: main-l7
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/stage: 02-operators-and-networking
+  name: main-l7
+spec:
+  controllerName: io.cilium/gateway-controller
+  parametersRef:
+    group: cilium.io
+    kind: CiliumGatewayClassConfig
+    name: main-l7-config
+    namespace: flux-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  annotations:
+    amispec.io/lb-provider: cilium-envoy
+    amispec.io/tls: letsencrypt-http01
+    amispec.io/tls-mode-resolved: letsencrypt-http01
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: main-l7
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/stage: 02-operators-and-networking
+  name: main-l7
+  namespace: flux-system
+spec:
+  gatewayClassName: main-l7
+  listeners:
+  - allowedRoutes:
+      namespaces:
+        from: Selector
+        selector:
+          matchExpressions:
+          - key: kubernetes.io/metadata.name
+            operator: In
+            values:
+            - dmz-public
+    hostname: admin.example.io
+    name: admin-example-io-http
+    port: 80
+    protocol: HTTP
+  - allowedRoutes:
+      namespaces:
+        from: Selector
+        selector:
+          matchExpressions:
+          - key: kubernetes.io/metadata.name
+            operator: In
+            values:
+            - dmz-public
+    hostname: admin.example.io
+    name: admin-example-io-https
+    port: 443
+    protocol: HTTPS
+    tls:
+      certificateRefs:
+      - kind: Secret
+        name: main-l7-admin-example-io-tls
+      mode: Terminate
+  - allowedRoutes:
+      namespaces:
+        from: Selector
+        selector:
+          matchExpressions:
+          - key: kubernetes.io/metadata.name
+            operator: In
+            values:
+            - dmz-public
+    hostname: example.io
+    name: example-io-http
+    port: 80
+    protocol: HTTP
+  - allowedRoutes:
+      namespaces:
+        from: Selector
+        selector:
+          matchExpressions:
+          - key: kubernetes.io/metadata.name
+            operator: In
+            values:
+            - dmz-public
+    hostname: example.io
+    name: example-io-https
+    port: 443
+    protocol: HTTPS
+    tls:
+      certificateRefs:
+      - kind: Secret
+        name: main-l7-example-io-tls
+      mode: Terminate
+---
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  annotations:
+    amispec.io/floating-ip-ref: fip-01
+    amispec.io/forwarding-mode: ebpf-dsr-maglev
+    amispec.io/lb-provider: cilium-l4-bgp
+    amispec.io/proxy-protocol-v2: 'true'
+    amispec.io/tls-mode-resolved: none
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: mqtt-l4
+    amispec.io/lb-layer: l4-balancer
+    amispec.io/stage: 02-operators-and-networking
+  name: mqtt-l4
+spec:
+  serviceSelector:
+    matchLabels:
+      amispec.io/lb-id: mqtt-l4
+=== clusters/local/02-operators-and-networking/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- networking.yaml
+- balancer-activation.yaml
+- gateways.yaml
+=== clusters/local/03-stateful-clusters/stateful.yaml ===
+[]
+=== clusters/local/03-stateful-clusters/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- stateful.yaml
+=== clusters/local/04a-provisioners-day2/jobs.yaml ===
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    amispec.io/binding-edge: 'keycloak->web:'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: keycloak
+    amispec.io/stage: 04a-provisioners-day2
+  name: provision-keycloak-a4acfcfa
+  namespace: default
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      containers:
+      - command:
+        - sh
+        - -c
+        - echo provision-binding && exit 0
+        image: busybox:1.36
+        name: provisioner
+      restartPolicy: Never
+  ttlSecondsAfterFinished: 86400
+=== clusters/local/04a-provisioners-day2/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- jobs.yaml
+=== clusters/local/04b-app-migrations-expand/jobs.yaml ===
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/stage: 04b-app-migrations-expand
+  name: migrate-expand-web-a1897b25
+  namespace: dmz-public
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      containers:
+      - command:
+        - sh
+        - -c
+        - echo expand-schema && exit 0
+        image: busybox:1.36
+        name: migrate
+      restartPolicy: Never
+  ttlSecondsAfterFinished: 86400
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: keycloak
+    amispec.io/stage: 04b-app-migrations-expand
+  name: migrate-expand-keycloak-44a39590
+  namespace: default
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      containers:
+      - command:
+        - sh
+        - -c
+        - echo expand-schema && exit 0
+        image: busybox:1.36
+        name: migrate
+      restartPolicy: Never
+  ttlSecondsAfterFinished: 86400
+=== clusters/local/04b-app-migrations-expand/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- jobs.yaml
+=== clusters/local/05-applications/namespaces.yaml ===
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 05-applications
+    amispec.io/zone: dmz-public
+  name: dmz-public
+=== clusters/local/05-applications/workloads.yaml ===
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":2,"shards":null},"workloadOverride":null,"zone":"dmz-public"}'
+    reloader.stakater.com/auto: 'true'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+    amispec.io/zone: dmz-public
+    app.kubernetes.io/instance: web
+    app.kubernetes.io/name: web
+  name: web
+  namespace: dmz-public
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  template:
+    metadata:
+      annotations:
+        amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":2,"shards":null},"workloadOverride":null,"zone":"dmz-public"}'
+        reloader.stakater.com/auto: 'true'
+      labels:
+        amispec.io/cluster-id: local
+        amispec.io/component-id: web
+        amispec.io/passport: stateless-app.1.0.0-rev1
+        amispec.io/stage: 05-applications
+        amispec.io/zone: dmz-public
+        app.kubernetes.io/instance: web
+        app.kubernetes.io/name: web
+    spec:
+      containers:
+      - image: stateless-app:1.0.0
+        name: app
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: '1'
+            memory: 256Mi
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+      terminationGracePeriodSeconds: 65
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
+    reloader.stakater.com/auto: 'true'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: keycloak
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+    app.kubernetes.io/instance: keycloak
+    app.kubernetes.io/name: keycloak
+  name: keycloak
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      annotations:
+        amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
+        reloader.stakater.com/auto: 'true'
+      labels:
+        amispec.io/cluster-id: local
+        amispec.io/component-id: keycloak
+        amispec.io/passport: stateless-app.1.0.0-rev1
+        amispec.io/stage: 05-applications
+        app.kubernetes.io/instance: keycloak
+        app.kubernetes.io/name: keycloak
+    spec:
+      containers:
+      - image: stateless-app:1.0.0
+        name: app
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: '1'
+            memory: 256Mi
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+      terminationGracePeriodSeconds: 65
+=== clusters/local/05-applications/pdb.yaml ===
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+  name: web-pdb
+  namespace: dmz-public
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: keycloak
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+  name: keycloak-pdb
+  namespace: default
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+=== clusters/local/05-applications/hpa.yaml ===
+[]
+=== clusters/local/05-applications/secrets.yaml ===
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":2,"shards":null},"workloadOverride":null,"zone":"dmz-public"}'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+  name: web-bindings
+  namespace: dmz-public
+stringData:
+  _amispec.component: web
+  _amispec.passport: stateless-app.1.0.0-rev1
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    amispec.io/binding-edge: 'keycloak->web:'
+    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: keycloak
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+  name: keycloak-bindings
+  namespace: default
+stringData:
+  _amispec.component: keycloak
+  _amispec.passport: stateless-app.1.0.0-rev1
+type: Opaque
+=== clusters/local/05-applications/routes.yaml ===
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/stage: 05-applications
+  name: web
+  namespace: dmz-public
+spec:
+  ports:
+  - name: web
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  - name: admin
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
+  selector:
+    app.kubernetes.io/name: web
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    amispec.io/host: example.io
+    amispec.io/host-source: hostname
+    amispec.io/host-value: example.io
+    amispec.io/path-prefix: /api/v2
+    amispec.io/security-policy: '{"corsAllowedOrigins":["https://app.example.io"],"rateLimitRps":500}'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/endpoint: web
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/scope: public
+    amispec.io/stage: 05-applications
+    amispec.io/via-balancer: main-l7
+  name: web-web
+  namespace: dmz-public
+spec:
+  hostnames:
+  - example.io
+  parentRefs:
+  - name: main-l7
+    namespace: flux-system
+  rules:
+  - backendRefs:
+    - name: web
+      port: 8080
+    filters:
+    - responseHeaderModifier:
+        set:
+        - name: Access-Control-Allow-Origin
+          value: https://app.example.io
+        - name: Access-Control-Allow-Methods
+          value: GET, POST, PUT, PATCH, DELETE, OPTIONS
+        - name: Access-Control-Allow-Headers
+          value: Authorization, Content-Type
+      type: ResponseHeaderModifier
+    matches:
+    - path:
+        type: PathPrefix
+        value: /api/v2
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    amispec.io/host: admin.example.io
+    amispec.io/host-source: subdomain
+    amispec.io/host-value: admin
+    amispec.io/path-prefix: /
+    amispec.io/security-policy: '{"clientAuth":"oidc"}'
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/endpoint: admin
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/scope: protected
+    amispec.io/stage: 05-applications
+    amispec.io/via-balancer: main-l7
+  name: web-admin
+  namespace: dmz-public
+spec:
+  hostnames:
+  - admin.example.io
+  parentRefs:
+  - name: main-l7
+    namespace: flux-system
+  rules:
+  - backendRefs:
+    - name: web
+      port: 9090
+    matches:
+    - path:
+        type: PathPrefix
+        value: /
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    amispec.io/floating-ip-ref: fip-01
+    amispec.io/host-source: none
+    amispec.io/host-value: ''
+    amispec.io/path-prefix: /
+    service.cilium.io/lb-algorithm: maglev
+    service.cilium.io/lb-mode: dsr
+    service.cilium.io/lb-proxy-protocol: v2
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/endpoint: mqtt
+    amispec.io/lb-layer: l4-balancer
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/scope: public
+    amispec.io/stage: 05-applications
+    amispec.io/via-balancer: mqtt-l4
+  name: web-mqtt
+  namespace: dmz-public
+spec:
+  allocateLoadBalancerNodePorts: false
+  ports:
+  - name: data
+    port: 1883
+    protocol: TCP
+    targetPort: 1883
+  selector:
+    app.kubernetes.io/name: web
+  type: LoadBalancer
+=== clusters/local/05-applications/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- namespaces.yaml
+- workloads.yaml
+- pdb.yaml
+- hpa.yaml
+- secrets.yaml
+- routes.yaml
+=== clusters/local/06-zero-trust-and-observability/netpols.yaml ===
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: local-kube-dns-guard
+  namespace: kube-system
+spec:
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:k8s-app: kube-dns
+    toPorts:
+    - ports:
+      - port: '53'
+        protocol: ANY
+  endpointSelector: {}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: local-web-egress
+  namespace: dmz-public
+spec:
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:k8s-app: kube-dns
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: keycloak
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: local-keycloak-egress
+  namespace: default
+spec:
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:k8s-app: kube-dns
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+=== clusters/local/06-zero-trust-and-observability/observability.yaml ===
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: web-metrics
+  namespace: dmz-public
+spec:
+  ports:
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  selector:
+    app.kubernetes.io/name: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: keycloak
+    amispec.io/stage: 06-zero-trust-and-observability
+  name: keycloak-metrics
+  namespace: default
+spec:
+  ports:
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  selector:
+    app.kubernetes.io/name: keycloak
+=== clusters/local/06-zero-trust-and-observability/edge-policies.yaml ===
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/component-id: web
+    amispec.io/endpoint: admin
+    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/scope: protected
+    amispec.io/stage: 06-zero-trust-and-observability
+    amispec.io/via-balancer: main-l7
+  name: local-web-edge-guard
+  namespace: dmz-public
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+  ingress:
+  - fromEntities:
+    - cluster
+    - ingress
+=== clusters/local/06-zero-trust-and-observability/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- netpols.yaml
+- observability.yaml
+- edge-policies.yaml
+=== clusters/local/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- flux-system
+- 01-node-tuning
+- 02-operators-and-networking
+- 03-stateful-clusters
+- 04a-provisioners-day2
+- 04b-app-migrations-expand
+- 05-applications
+- 06-zero-trust-and-observability
+=== clusters/_meta/external-resources.yaml ===
+[]
+=== clusters/_meta/cross-cluster-links.yaml ===
+[]
+=== clusters/_meta/kustomization.yaml ===
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- external-resources.yaml
+- cross-cluster-links.yaml

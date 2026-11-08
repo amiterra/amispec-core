@@ -1,8 +1,8 @@
 //! TopologyBlueprint structural + semantic rules.
 
-use crate::patterns::{is_age_key, is_sha256_digest, is_sops_uri, is_slug, is_script_ref};
-use crate::report::Finding;
 use super::deep;
+use crate::patterns::{is_age_key, is_script_ref, is_sha256_digest, is_slug, is_sops_uri};
+use crate::report::Finding;
 use crate::value::*;
 
 const CNI_ENGINE: &str = "cilium-ebpf";
@@ -19,14 +19,22 @@ const RELATIONS: &[&str] = &[
     "global-service-mesh",
     "telemetry-and-events-uplink",
 ];
-const BINDING_TYPES: &[&str] = &["service-binding", "live-migration-replica", "oidc-protection"];
+const BINDING_TYPES: &[&str] = &[
+    "service-binding",
+    "live-migration-replica",
+    "oidc-protection",
+];
 const DELIVERY: &[&str] = &["direct", "transactional-outbox"];
 const EXPOSE_SCOPES: &[&str] = &["public", "protected"];
 
 pub fn check(root: &Map, out: &mut Vec<Finding>) {
     // metadata
     let Some(meta) = root.get("metadata") else {
-        out.push(Finding::error("metadata", "required", "metadata is required"));
+        out.push(Finding::error(
+            "metadata",
+            "required",
+            "metadata is required",
+        ));
         return;
     };
     if let Some(pid) = req_str(meta, "projectId", "metadata", out) {
@@ -179,7 +187,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
 
         // cni
         let Some(cni) = cluster.get("cni") else {
-            out.push(Finding::error(format!("{cpath}.cni"), "required", "cni is required"));
+            out.push(Finding::error(
+                format!("{cpath}.cni"),
+                "required",
+                "cni is required",
+            ));
             continue;
         };
         if let Some(eng) = opt_str(cni, "engine") {
@@ -222,7 +234,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
 
         // nodes
         let Some(nodes) = cluster.get("nodes").and_then(as_seq) else {
-            out.push(Finding::error(format!("{cpath}.nodes"), "required", "nodes is required"));
+            out.push(Finding::error(
+                format!("{cpath}.nodes"),
+                "required",
+                "nodes is required",
+            ));
             continue;
         };
         for (ni, node) in nodes.iter().enumerate() {
@@ -238,7 +254,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 ));
                 continue;
             };
-            check_enum(hw, "arch", &format!("{npath}.hardware"), ARCH, out, "arch-enum");
+            check_enum(
+                hw,
+                "arch",
+                &format!("{npath}.hardware"),
+                ARCH,
+                out,
+                "arch-enum",
+            );
             match get(hw, "cpuCores").and_then(as_f64) {
                 Some(c) if c > 0.0 => {}
                 Some(c) => out.push(Finding::error(
@@ -431,7 +454,15 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                         "maxReplicas MUST be >= 1",
                     )),
                 }
-                check_int_range(as_, "targetCpuPercent", &apath, 10, Some(95), out, "cpu-target");
+                check_int_range(
+                    as_,
+                    "targetCpuPercent",
+                    &apath,
+                    10,
+                    Some(95),
+                    out,
+                    "cpu-target",
+                );
             }
 
             let Some(res) = comp.get("resources") else {
@@ -470,7 +501,15 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             }
 
             if let Some(st) = comp.get("storage") {
-                check_int_range(st, "sizeGb", &format!("{ppath}.storage"), 1, None, out, "disk-size");
+                check_int_range(
+                    st,
+                    "sizeGb",
+                    &format!("{ppath}.storage"),
+                    1,
+                    None,
+                    out,
+                    "disk-size",
+                );
                 check_enum(
                     st,
                     "mediaTier",
@@ -491,15 +530,24 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                         ));
                     }
                 }
-                for cmd in ["preDeployExpandCommand", "postDeployContractCommand", "preScaleDownDrainCommand"] {
+                for cmd in [
+                    "preDeployExpandCommand",
+                    "postDeployContractCommand",
+                    "preScaleDownDrainCommand",
+                ] {
                     if let Some(script) = get(wo, cmd).and_then(as_str) {
-                        if script.contains("://") && !is_script_ref(script) && !script.starts_with("scripts/") {
+                        if script.contains("://")
+                            && !is_script_ref(script)
+                            && !script.starts_with("scripts/")
+                        {
                             // allow raw argv arrays only; strings that look like URIs must match
                             if script.contains("://") {
                                 out.push(Finding::error(
                                     format!("{ppath}.workloadOverride.{cmd}"),
                                     "script-ref-regex",
-                                    format!("`{script}` MUST match scriptRef pattern when it is a URI"),
+                                    format!(
+                                        "`{script}` MUST match scriptRef pattern when it is a URI"
+                                    ),
                                 ));
                             }
                         }
@@ -507,7 +555,13 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 }
             }
 
-            for (bi, b) in comp.get("bindings").and_then(as_seq).unwrap_or(&vec![]).iter().enumerate() {
+            for (bi, b) in comp
+                .get("bindings")
+                .and_then(as_seq)
+                .unwrap_or(&vec![])
+                .iter()
+                .enumerate()
+            {
                 check_binding(b, &format!("{ppath}.bindings[{bi}]"), &comp_ids, out);
             }
 
@@ -524,7 +578,13 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
         }
 
         // cluster-level bindings
-        for (bi, b) in cluster.get("bindings").and_then(as_seq).unwrap_or(&vec![]).iter().enumerate() {
+        for (bi, b) in cluster
+            .get("bindings")
+            .and_then(as_seq)
+            .unwrap_or(&vec![])
+            .iter()
+            .enumerate()
+        {
             check_binding(b, &format!("{cpath}.bindings[{bi}]"), &comp_ids, out);
             if get(b, "from").and_then(as_str).is_none() {
                 out.push(Finding::error(
@@ -544,7 +604,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             for field in ["fromCluster", "fromComponent", "toCluster", "toComponent"] {
                 req_str(link, field, &lpath, out);
             }
-            req_enum(link, "relationType", &lpath, RELATIONS, out, "relation-enum");
+            req_enum(
+                link,
+                "relationType",
+                &lpath,
+                RELATIONS,
+                out,
+                "relation-enum",
+            );
             for field in ["fromCluster", "toCluster"] {
                 if let Some(c) = opt_str(link, field) {
                     if !cluster_ids.contains(c) {
@@ -562,7 +629,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
     // ===== deep nested rules =====
     if let Some(exts) = root.get("externalResources").and_then(as_seq) {
         for (i, e) in exts.iter().enumerate() {
-            check_enum(e, "transport", &format!("externalResources[{i}]"), deep::TRANSPORT, out, "transport-enum");
+            check_enum(
+                e,
+                "transport",
+                &format!("externalResources[{i}]"),
+                deep::TRANSPORT,
+                out,
+                "transport-enum",
+            );
         }
     }
     if let Some(scripts) = root.get("scripts") {
@@ -610,8 +684,17 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                     }
                 }
                 if let Some(wo) = comp.get("workloadOverride") {
-                    for cmd in ["preDeployExpandCommand", "postDeployContractCommand", "preScaleDownDrainCommand"] {
-                        deep::check_script_ref_field(wo, cmd, &format!("{ppath}.workloadOverride"), out);
+                    for cmd in [
+                        "preDeployExpandCommand",
+                        "postDeployContractCommand",
+                        "preScaleDownDrainCommand",
+                    ] {
+                        deep::check_script_ref_field(
+                            wo,
+                            cmd,
+                            &format!("{ppath}.workloadOverride"),
+                            out,
+                        );
                     }
                 }
                 if let Some(eg) = comp.get("egressOverride") {
@@ -634,8 +717,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
     }
 }
 
-const EGRESS_MODES: &[&str] = &["graph-only", "allow-public-internet", "allow-fqdn-whitelist"];
-
+const EGRESS_MODES: &[&str] = &[
+    "graph-only",
+    "allow-public-internet",
+    "allow-fqdn-whitelist",
+];
 
 fn check_binding(
     b: &Yaml,
@@ -645,8 +731,23 @@ fn check_binding(
 ) {
     req_str(b, "to", bpath, out);
     check_enum(b, "type", bpath, BINDING_TYPES, out, "binding-type-enum");
-    check_enum(b, "deliveryGuarantee", bpath, DELIVERY, out, "delivery-enum");
-    check_int_range(b, "secretRotationEpoch", bpath, 1, None, out, "rotation-epoch");
+    check_enum(
+        b,
+        "deliveryGuarantee",
+        bpath,
+        DELIVERY,
+        out,
+        "delivery-enum",
+    );
+    check_int_range(
+        b,
+        "secretRotationEpoch",
+        bpath,
+        1,
+        None,
+        out,
+        "rotation-epoch",
+    );
     if let Some(to) = opt_str(b, "to") {
         // resolution is soft: target may be externalResources or a component in another cluster
         if !comp_ids.contains(to) && !is_slug(to) {

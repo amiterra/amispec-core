@@ -11,7 +11,8 @@ pub const MERGE_STRATEGY: &[&str] = &["max", "min", "exclusive-match"];
 pub const SCRIPT_RUNTIME: &[&str] = &["posix-sh", "sql", "python"];
 pub const RESIZE_POLICY: &[&str] = &["expand-only-monotonic", "immutable"];
 pub const DELETION_POLICY: &[&str] = &["retain", "delete"];
-pub const NODE_LOSS_RECOVERY: &[&str] = &["rehydrate-from-backup", "reseed-from-peer", "manual-wait"];
+pub const NODE_LOSS_RECOVERY: &[&str] =
+    &["rehydrate-from-backup", "reseed-from-peer", "manual-wait"];
 pub const LVM_PROVISIONER: &[&str] = &["topolvm-nvme", "local-path", "external-csi"];
 pub const VOLUME_BINDING: &[&str] = &["WaitForFirstConsumer", "Immediate"];
 pub const FILESYSTEM: &[&str] = &["xfs", "ext4"];
@@ -52,8 +53,11 @@ pub const VERTICAL_CPU: &[&str] = &["in-place", "pod-restart"];
 pub const VERTICAL_MEM: &[&str] = &["in-place-grow-only", "pod-restart"];
 pub const CPU_PINNING: &[&str] = &["shared", "exclusive-static"];
 pub const UI_CONTROL: &[&str] = &["input", "number", "slider", "select", "toggle", "tags"];
-pub const ANOMALY_ALGO: &[&str] =
-    &["z-score-3sigma", "linear-regression-disk-full", "static-threshold"];
+pub const ANOMALY_ALGO: &[&str] = &[
+    "z-score-3sigma",
+    "linear-regression-disk-full",
+    "static-threshold",
+];
 pub const BACKUP_VERSION_COUPLING: &[&str] = &["match-workload-major", "pinned"];
 pub const BACKUP_TARGET_REPLICA: &[&str] = &["prefer-standby", "primary-only"];
 pub const STREAMING: &[&str] = &["none", "websocket", "sse", "grpc-bidi"];
@@ -102,14 +106,49 @@ pub fn check_volume(v: &Yaml, path: &str, out: &mut Vec<Finding>) {
             "defaultSizeGb is required",
         )),
     }
-    check_enum(v, "resizePolicy", path, RESIZE_POLICY, out, "resize-policy-enum");
-    check_enum(v, "deletionPolicy", path, DELETION_POLICY, out, "deletion-policy-enum");
-    check_enum(v, "nodeLossRecovery", path, NODE_LOSS_RECOVERY, out, "node-loss-enum");
+    check_enum(
+        v,
+        "resizePolicy",
+        path,
+        RESIZE_POLICY,
+        out,
+        "resize-policy-enum",
+    );
+    check_enum(
+        v,
+        "deletionPolicy",
+        path,
+        DELETION_POLICY,
+        out,
+        "deletion-policy-enum",
+    );
+    check_enum(
+        v,
+        "nodeLossRecovery",
+        path,
+        NODE_LOSS_RECOVERY,
+        out,
+        "node-loss-enum",
+    );
     check_enum(v, "mediaTier", path, MEDIA_TIERS, out, "media-tier-enum");
     if let Some(lvm) = get(v, "lvmOptions") {
         let lp = format!("{path}.lvmOptions");
-        check_enum(lvm, "provisioner", &lp, LVM_PROVISIONER, out, "lvm-provisioner-enum");
-        check_enum(lvm, "volumeBindingMode", &lp, VOLUME_BINDING, out, "volume-binding-enum");
+        check_enum(
+            lvm,
+            "provisioner",
+            &lp,
+            LVM_PROVISIONER,
+            out,
+            "lvm-provisioner-enum",
+        );
+        check_enum(
+            lvm,
+            "volumeBindingMode",
+            &lp,
+            VOLUME_BINDING,
+            out,
+            "volume-binding-enum",
+        );
         check_enum(lvm, "filesystem", &lp, FILESYSTEM, out, "filesystem-enum");
         check_int_range(lvm, "emergencyBallastMb", &lp, 0, None, out, "ballast");
         if let Some(flags) = get(lvm, "mountFlags").and_then(as_seq) {
@@ -149,7 +188,14 @@ pub fn check_kernel_tuning(k: &Yaml, path: &str, out: &mut Vec<Finding>) {
                         "tunable value is required",
                     ));
                 }
-                check_enum(pv, "mergeStrategy", &ppath, MERGE_STRATEGY, out, "merge-strategy-enum");
+                check_enum(
+                    pv,
+                    "mergeStrategy",
+                    &ppath,
+                    MERGE_STRATEGY,
+                    out,
+                    "merge-strategy-enum",
+                );
             }
         }
     }
@@ -158,8 +204,22 @@ pub fn check_kernel_tuning(k: &Yaml, path: &str, out: &mut Vec<Finding>) {
 /// Check `operations.backup`.
 pub fn check_backup(b: &Yaml, path: &str, out: &mut Vec<Finding>) {
     req_str(b, "driver", path, out);
-    check_enum(b, "versionCoupling", path, BACKUP_VERSION_COUPLING, out, "version-coupling-enum");
-    check_enum(b, "targetReplicaRole", path, BACKUP_TARGET_REPLICA, out, "target-replica-enum");
+    check_enum(
+        b,
+        "versionCoupling",
+        path,
+        BACKUP_VERSION_COUPLING,
+        out,
+        "version-coupling-enum",
+    );
+    check_enum(
+        b,
+        "targetReplicaRole",
+        path,
+        BACKUP_TARGET_REPLICA,
+        out,
+        "target-replica-enum",
+    );
     check_int_range(b, "maxUploadBandwidthMbps", path, 1, None, out, "upload-bw");
     check_int_range(b, "retentionDays", path, 1, None, out, "retention-min");
 }
@@ -191,7 +251,11 @@ pub fn check_live_migration(lm: &Yaml, path: &str, out: &mut Vec<Finding>) {
         out,
         "cutover-lag",
     );
-    if get(wf, "steps").and_then(as_seq).map(|s| s.is_empty()).unwrap_or(true) {
+    if get(wf, "steps")
+        .and_then(as_seq)
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
         out.push(Finding::error(
             format!("{path}.cutoverWorkflow.steps"),
             "min-items",
@@ -203,12 +267,23 @@ pub fn check_live_migration(lm: &Yaml, path: &str, out: &mut Vec<Finding>) {
 /// Check scripts map (`#ScriptSpec`).
 pub fn check_scripts(scripts: &Yaml, path: &str, out: &mut Vec<Finding>) {
     let Some(m) = as_map(scripts) else {
-        out.push(Finding::error(path, "type-map", "scripts MUST be a mapping"));
+        out.push(Finding::error(
+            path,
+            "type-map",
+            "scripts MUST be a mapping",
+        ));
         return;
     };
     for (k, v) in m {
         let sp = format!("{path}.{}", key_str(k));
-        req_enum(v, "runtime", &sp, SCRIPT_RUNTIME, out, "script-runtime-enum");
+        req_enum(
+            v,
+            "runtime",
+            &sp,
+            SCRIPT_RUNTIME,
+            out,
+            "script-runtime-enum",
+        );
         check_int_range(v, "timeoutSeconds", &sp, 1, None, out, "script-timeout");
         let has_path = opt_str(v, "path").is_some();
         let has_inline = opt_str(v, "inline").is_some();
@@ -227,8 +302,24 @@ pub fn check_sidecar_extra(side: &Yaml, path: &str, out: &mut Vec<Finding>) {
     if get(side, "exportedTokens").is_none() {
         // exportedTokens is required in CUE under clientContract
     }
-    check_int_range(side, "healthcheckIntervalSec", path, 1, None, out, "healthcheck");
-    check_int_range(side, "preStopDrainDelaySec", path, 0, None, out, "prestop-drain");
+    check_int_range(
+        side,
+        "healthcheckIntervalSec",
+        path,
+        1,
+        None,
+        out,
+        "healthcheck",
+    );
+    check_int_range(
+        side,
+        "preStopDrainDelaySec",
+        path,
+        0,
+        None,
+        out,
+        "prestop-drain",
+    );
 }
 
 /// Check expose entry securityPolicy + gatewayTuning-like fields.
@@ -236,7 +327,14 @@ pub fn check_expose(ex: &Yaml, path: &str, out: &mut Vec<Finding>) {
     req_str(ex, "endpoint", path, out);
     req_str(ex, "viaBalancer", path, out);
     if let Some(sp) = get(ex, "securityPolicy") {
-        check_enum(sp, "clientAuth", &format!("{path}.securityPolicy"), CLIENT_AUTH, out, "client-auth-enum");
+        check_enum(
+            sp,
+            "clientAuth",
+            &format!("{path}.securityPolicy"),
+            CLIENT_AUTH,
+            out,
+            "client-auth-enum",
+        );
         check_int_range(
             sp,
             "rateLimitRps",
@@ -253,15 +351,37 @@ pub fn check_expose(ex: &Yaml, path: &str, out: &mut Vec<Finding>) {
 pub fn check_load_balancer(lb: &Yaml, path: &str, out: &mut Vec<Finding>) {
     req_str(lb, "id", path, out);
     req_str(lb, "provider", path, out);
-    check_enum(lb, "forwardingMode", path, FORWARDING_MODE, out, "forwarding-enum");
+    check_enum(
+        lb,
+        "forwardingMode",
+        path,
+        FORWARDING_MODE,
+        out,
+        "forwarding-enum",
+    );
     check_enum(lb, "tls", path, LB_TLS, out, "lb-tls-enum");
 }
 
 /// Check gatewayTuning on endpoints.
 pub fn check_gateway_tuning(gt: &Yaml, path: &str, out: &mut Vec<Finding>) {
     check_enum(gt, "streaming", path, STREAMING, out, "streaming-enum");
-    check_enum(gt, "sessionAffinity", path, SESSION_AFFINITY, out, "session-affinity-enum");
-    check_int_range(gt, "requestHeadersTimeoutSec", path, 1, None, out, "header-timeout");
+    check_enum(
+        gt,
+        "sessionAffinity",
+        path,
+        SESSION_AFFINITY,
+        out,
+        "session-affinity-enum",
+    );
+    check_int_range(
+        gt,
+        "requestHeadersTimeoutSec",
+        path,
+        1,
+        None,
+        out,
+        "header-timeout",
+    );
     check_int_range(gt, "timeoutSeconds", path, 1, None, out, "endpoint-timeout");
     if let Some(mb) = get(gt, "maxBodySizeMb").and_then(as_i64) {
         if mb < 0 {
@@ -329,7 +449,14 @@ pub fn check_security_zone(z: &Yaml, path: &str, out: &mut Vec<Finding>) {
     req_str(z, "id", path, out);
     req_str(z, "name", path, out);
     req_str(z, "color", path, out);
-    check_enum(z, "podSecurityStandard", path, POD_SECURITY, out, "pod-security-enum");
+    check_enum(
+        z,
+        "podSecurityStandard",
+        path,
+        POD_SECURITY,
+        out,
+        "pod-security-enum",
+    );
     if let Some(c) = get(z, "quotaCpuCores").and_then(as_f64) {
         if c <= 0.0 {
             out.push(Finding::error(
@@ -353,7 +480,14 @@ pub fn check_cross_cluster_link(link: &Yaml, path: &str, out: &mut Vec<Finding>)
 /// Check topologies mode quorum fields on a topologyModes entry.
 pub fn check_topology_mode_extras(v: &Yaml, path: &str, out: &mut Vec<Finding>) {
     check_enum(v, "quorumType", path, QUORUM_TYPE, out, "quorum-type-enum");
-    check_enum(v, "quorumArbiter", path, QUORUM_ARBITER, out, "quorum-arbiter-enum");
+    check_enum(
+        v,
+        "quorumArbiter",
+        path,
+        QUORUM_ARBITER,
+        out,
+        "quorum-arbiter-enum",
+    );
     if let Some(w) = get(v, "witnessComponent") {
         let wp = format!("{path}.witnessComponent");
         req_str(w, "image", &wp, out);
@@ -364,13 +498,27 @@ pub fn check_topology_mode_extras(v: &Yaml, path: &str, out: &mut Vec<Finding>) 
                 "enabled is required",
             ));
         }
-        check_enum(w, "placement", &wp, WITNESS_PLACEMENT, out, "witness-placement-enum");
+        check_enum(
+            w,
+            "placement",
+            &wp,
+            WITNESS_PLACEMENT,
+            out,
+            "witness-placement-enum",
+        );
     }
 }
 
 /// Check workload nested optionals (peerDiscovery, schedule, lifecycle, configMounts, helm, operator).
 pub fn check_workload_extras(wl: &Yaml, path: &str, out: &mut Vec<Finding>) {
-    check_enum(wl, "peerDiscovery", path, PEER_DISCOVERY, out, "peer-discovery-enum");
+    check_enum(
+        wl,
+        "peerDiscovery",
+        path,
+        PEER_DISCOVERY,
+        out,
+        "peer-discovery-enum",
+    );
     if let Some(sched) = get(wl, "schedule") {
         req_str(sched, "cron", &format!("{path}.schedule"), out);
         check_enum(
@@ -381,7 +529,15 @@ pub fn check_workload_extras(wl: &Yaml, path: &str, out: &mut Vec<Finding>) {
             out,
             "concurrency-enum",
         );
-        check_int_range(sched, "timeoutSeconds", &format!("{path}.schedule"), 1, None, out, "sched-timeout");
+        check_int_range(
+            sched,
+            "timeoutSeconds",
+            &format!("{path}.schedule"),
+            1,
+            None,
+            out,
+            "sched-timeout",
+        );
     }
     if let Some(lc) = get(wl, "lifecycle") {
         let lp = format!("{path}.lifecycle");
@@ -396,14 +552,29 @@ pub fn check_workload_extras(wl: &Yaml, path: &str, out: &mut Vec<Finding>) {
             "surge-policy-enum",
         );
         check_int_range(lc, "preStopSleepSec", &lp, 0, None, out, "prestop-sleep");
-        check_int_range(lc, "gracefulStopTimeoutSec", &lp, 0, None, out, "graceful-stop");
+        check_int_range(
+            lc,
+            "gracefulStopTimeoutSec",
+            &lp,
+            0,
+            None,
+            out,
+            "graceful-stop",
+        );
     }
     if let Some(mounts) = get(wl, "configMounts").and_then(as_seq) {
         for (i, m) in mounts.iter().enumerate() {
             let mp = format!("{path}.configMounts[{i}]");
             req_str(m, "name", &mp, out);
             req_str(m, "mountPath", &mp, out);
-            req_enum(m, "reloadStrategy", &mp, RELOAD_STRATEGY, out, "reload-strategy-enum");
+            req_enum(
+                m,
+                "reloadStrategy",
+                &mp,
+                RELOAD_STRATEGY,
+                out,
+                "reload-strategy-enum",
+            );
         }
     }
     if let Some(scripts) = get(wl, "scripts") {
@@ -413,7 +584,14 @@ pub fn check_workload_extras(wl: &Yaml, path: &str, out: &mut Vec<Finding>) {
 
 /// Check hardwareAndKernel.resources extras.
 pub fn check_hardware_resources_extras(res: &Yaml, path: &str, out: &mut Vec<Finding>) {
-    check_enum(res, "numaTopologyPolicy", path, NUMA_POLICY, out, "numa-enum");
+    check_enum(
+        res,
+        "numaTopologyPolicy",
+        path,
+        NUMA_POLICY,
+        out,
+        "numa-enum",
+    );
     if let Some(vs) = get(res, "verticalScalePolicy") {
         let vp = format!("{path}.verticalScalePolicy");
         check_enum(vs, "cpu", &vp, VERTICAL_CPU, out, "vert-cpu-enum");
@@ -433,13 +611,23 @@ pub fn check_hardware_resources_extras(res: &Yaml, path: &str, out: &mut Vec<Fin
             }
         }
     }
-    check_enum(res, "cpuPinning", path, CPU_PINNING, out, "cpu-pinning-enum");
+    check_enum(
+        res,
+        "cpuPinning",
+        path,
+        CPU_PINNING,
+        out,
+        "cpu-pinning-enum",
+    );
 }
 
 /// Check parameters extras (uiControl, min/max).
 pub fn check_parameter_extras(v: &Yaml, path: &str, out: &mut Vec<Finding>) {
     check_enum(v, "uiControl", path, UI_CONTROL, out, "ui-control-enum");
-    if let (Some(min), Some(max)) = (get(v, "min").and_then(as_f64), get(v, "max").and_then(as_f64)) {
+    if let (Some(min), Some(max)) = (
+        get(v, "min").and_then(as_f64),
+        get(v, "max").and_then(as_f64),
+    ) {
         if min > max {
             out.push(Finding::error(
                 path,
@@ -459,7 +647,11 @@ pub fn check_anomaly_rule(r: &Yaml, path: &str, out: &mut Vec<Finding>) {
 /// Check topologyModes witness already partially covered; storage volumes map.
 pub fn check_volumes_map(volumes: &Yaml, path: &str, out: &mut Vec<Finding>) {
     let Some(m) = as_map(volumes) else {
-        out.push(Finding::error(path, "type-map", "volumes MUST be a mapping"));
+        out.push(Finding::error(
+            path,
+            "type-map",
+            "volumes MUST be a mapping",
+        ));
         return;
     };
     for (k, v) in m {
@@ -495,7 +687,13 @@ pub fn check_digest_field(parent: &Yaml, key: &str, path: &str, out: &mut Vec<Fi
 
 /// Check `workload.operatorSpec` required fields.
 pub fn check_operator_spec(op: &Yaml, path: &str, out: &mut Vec<Finding>) {
-    for key in ["operatorHelmChart", "operatorVersion", "crdApiVersion", "crdKind", "manifestTemplate"] {
+    for key in [
+        "operatorHelmChart",
+        "operatorVersion",
+        "crdApiVersion",
+        "crdKind",
+        "manifestTemplate",
+    ] {
         req_str(op, key, path, out);
     }
 }

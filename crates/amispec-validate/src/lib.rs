@@ -33,7 +33,9 @@ mod value;
 
 pub use patterns::*;
 pub use report::{Finding, Report, Severity};
-pub use rules::{validate_topology_str, Options};
+pub use rules::{Options, validate_topology_str};
+
+pub use amispec_schema::PassportSlots;
 
 use report::Finding as F;
 use rules::validate as validate_inner;
@@ -76,6 +78,31 @@ pub fn expected_api_version(kind: DocumentKind) -> &'static str {
 
 /// Validate YAML text for `source` (used in messages).
 pub fn validate_str(source: &str, yaml: &str, opts: &Options) -> Report {
+    validate_str_inner(source, yaml, opts, None)
+}
+
+/// Validate topology YAML against a passport catalog (Design Doc 0026 §1.2).
+///
+/// Runs the full structural + semantic suite plus the `requires` closure:
+/// every passport `requires` slot must be closed by a binding to a provider
+/// with a matching `provides` capability. This is the shared rule set of both
+/// delivery doors (API preview and `ami topology validate`) — same code base,
+/// identical findings.
+pub fn validate_str_with_catalog(
+    source: &str,
+    yaml: &str,
+    opts: &Options,
+    catalog: &std::collections::BTreeMap<String, amispec_schema::PassportSlots>,
+) -> Report {
+    validate_str_inner(source, yaml, opts, Some(catalog))
+}
+
+fn validate_str_inner(
+    source: &str,
+    yaml: &str,
+    opts: &Options,
+    catalog: Option<&std::collections::BTreeMap<String, amispec_schema::PassportSlots>>,
+) -> Report {
     let mut report = Report::new(source);
     let value = match serde_yaml::from_str::<Yaml>(yaml) {
         Ok(v) => v,
@@ -95,15 +122,16 @@ pub fn validate_str(source: &str, yaml: &str, opts: &Options) -> Report {
         report.push(F::error(
             "kind",
             "kind-enum",
-            format!(
-                "unknown kind `{kind_str}` (expected ComponentPassport | TopologyBlueprint)"
-            ),
+            format!("unknown kind `{kind_str}` (expected ComponentPassport | TopologyBlueprint)"),
         ));
         return report;
     };
     report.kind = Some(kind);
 
-    let api = root.get("apiVersion").and_then(|v| v.as_str()).unwrap_or("");
+    let api = root
+        .get("apiVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let expected = expected_api_version(kind);
     if api != expected {
         report.push(F::error(
@@ -113,7 +141,7 @@ pub fn validate_str(source: &str, yaml: &str, opts: &Options) -> Report {
         ));
     }
 
-    validate_inner(kind, root, &mut report);
+    validate_inner(kind, root, catalog, &mut report);
 
     if opts.use_cue {
         if let Some(dir) = opts.schema_dir.as_deref() {
@@ -337,7 +365,11 @@ operations:
     versionCoupling: guess
     targetReplicaRole: primary-when-easy
 "#;
-        for rule in ["anomaly-algo-enum", "version-coupling-enum", "target-replica-enum"] {
+        for rule in [
+            "anomaly-algo-enum",
+            "version-coupling-enum",
+            "target-replica-enum",
+        ] {
             assert_rule(yaml, rule);
         }
     }

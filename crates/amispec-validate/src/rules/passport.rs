@@ -1,8 +1,8 @@
 //! ComponentPassport structural rules (mirrors CUE `#ComponentPassport`).
 
+use super::deep;
 use crate::patterns::{is_accent_color, is_sha256_digest, is_slug};
 use crate::report::Finding;
-use super::deep;
 use crate::value::*;
 
 const CATEGORIES: &[&str] = &[
@@ -60,12 +60,21 @@ const PARAM_TYPES: &[&str] = &[
     "string-list",
     "secret-ref",
 ];
-const APPLY_IMPACTS: &[&str] = &["pod-restart", "hot-reload", "rolling-switchover", "immutable"];
+const APPLY_IMPACTS: &[&str] = &[
+    "pod-restart",
+    "hot-reload",
+    "rolling-switchover",
+    "immutable",
+];
 const FORMULA_IMPACTS: &[&str] = &["hot-reload", "rolling-switchover", "pod-restart"];
 const FORMULA_UNITS: &[&str] = &["MB", "GB", "bytes", "count", "string"];
 const PROBE_TYPES: &[&str] = &["http", "tcp", "grpc", "exec"];
 const PROBE_SCHEMES: &[&str] = &["HTTP", "HTTPS"];
-const EGRESS_MODES: &[&str] = &["graph-only", "allow-public-internet", "allow-fqdn-whitelist"];
+const EGRESS_MODES: &[&str] = &[
+    "graph-only",
+    "allow-public-internet",
+    "allow-fqdn-whitelist",
+];
 const TLS_MODES: &[&str] = &["none", "auto-internal-ca", "self-signed-upstream"];
 const PROTOCOLS: &[&str] = &["http", "grpc", "tcp", "udp", "tcp-udp"];
 const ENDPOINT_ROLES: &[&str] = &[
@@ -106,11 +115,19 @@ const EXEC_TYPES: &[&str] = &["gitops-patch", "k8s-job", "operator-annotation"];
 pub fn check(root: &Map, out: &mut Vec<Finding>) {
     // --- metadata ---
     let Some(meta) = root.get("metadata") else {
-        out.push(Finding::error("metadata", "required", "metadata is required"));
+        out.push(Finding::error(
+            "metadata",
+            "required",
+            "metadata is required",
+        ));
         return;
     };
     if as_map(meta).is_none() {
-        out.push(Finding::error("metadata", "type-map", "metadata MUST be a mapping"));
+        out.push(Finding::error(
+            "metadata",
+            "type-map",
+            "metadata MUST be a mapping",
+        ));
         return;
     }
 
@@ -140,12 +157,33 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
         )),
     }
 
-    req_enum(meta, "category", "metadata", CATEGORIES, out, "category-enum");
-    req_enum(meta, "archetype", "metadata", ARCHETYPES, out, "archetype-enum");
+    req_enum(
+        meta,
+        "category",
+        "metadata",
+        CATEGORIES,
+        out,
+        "category-enum",
+    );
+    req_enum(
+        meta,
+        "archetype",
+        "metadata",
+        ARCHETYPES,
+        out,
+        "archetype-enum",
+    );
 
     // distribution
     if let Some(dist) = get(meta, "distribution") {
-        check_enum(dist, "tier", "metadata.distribution", TIERS, out, "tier-enum");
+        check_enum(
+            dist,
+            "tier",
+            "metadata.distribution",
+            TIERS,
+            out,
+            "tier-enum",
+        );
         if let Some(lic) = opt_str(dist, "license") {
             if lic.is_empty() {
                 out.push(Finding::error(
@@ -184,7 +222,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 "accentColor is required",
             ));
         }
-        req_enum(ui, "nodeShape", "metadata.canvasUI", NODE_SHAPES, out, "node-shape-enum");
+        req_enum(
+            ui,
+            "nodeShape",
+            "metadata.canvasUI",
+            NODE_SHAPES,
+            out,
+            "node-shape-enum",
+        );
     } else {
         out.push(Finding::error(
             "metadata.canvasUI",
@@ -193,14 +238,20 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
         ));
     }
 
-
     // --- parameters ---
     if let Some(params) = root.get("parameters").and_then(as_map) {
         for (k, v) in params {
             let ppath = format!("parameters.{}", key_str(k));
             req_str(v, "label", &ppath, out);
             req_enum(v, "type", &ppath, PARAM_TYPES, out, "param-type-enum");
-            req_enum(v, "applyImpact", &ppath, APPLY_IMPACTS, out, "apply-impact-enum");
+            req_enum(
+                v,
+                "applyImpact",
+                &ppath,
+                APPLY_IMPACTS,
+                out,
+                "apply-impact-enum",
+            );
             if opt_str(v, "type") == Some("enum") {
                 match get(v, "enumValues").and_then(as_seq) {
                     Some(list) if !list.is_empty() => {}
@@ -228,7 +279,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                         "replicas is required (int or CEL string)",
                     ));
                 }
-                req_enum(v, "scaleDownPolicy", &mpath, SCALE_DOWN, out, "scale-down-enum");
+                req_enum(
+                    v,
+                    "scaleDownPolicy",
+                    &mpath,
+                    SCALE_DOWN,
+                    out,
+                    "scale-down-enum",
+                );
                 if let Some(budget) = get(v, "disruptionBudget") {
                     check_enum(
                         budget,
@@ -319,7 +377,15 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 let ppath = format!("workload.probes.{}", key_str(k));
                 check_enum(p, "type", &ppath, PROBE_TYPES, out, "probe-type-enum");
                 check_enum(p, "scheme", &ppath, PROBE_SCHEMES, out, "probe-scheme-enum");
-                check_int_range(p, "failureThreshold", &ppath, 1, None, out, "probe-threshold");
+                check_int_range(
+                    p,
+                    "failureThreshold",
+                    &ppath,
+                    1,
+                    None,
+                    out,
+                    "probe-threshold",
+                );
                 check_int_range(p, "periodSeconds", &ppath, 1, None, out, "probe-period");
                 check_int_range(p, "timeoutSeconds", &ppath, 1, None, out, "probe-timeout");
                 // CUE: liveness?: #ProbeSpec & {localProcessOnly: true}
@@ -341,7 +407,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 req_str(f, "cel", &fpath, out);
                 req_str(f, "targetPath", &fpath, out);
                 req_str(f, "description", &fpath, out);
-                req_enum(f, "applyImpact", &fpath, FORMULA_IMPACTS, out, "formula-impact-enum");
+                req_enum(
+                    f,
+                    "applyImpact",
+                    &fpath,
+                    FORMULA_IMPACTS,
+                    out,
+                    "formula-impact-enum",
+                );
                 check_enum(f, "unit", &fpath, FORMULA_UNITS, out, "formula-unit-enum");
             }
         }
@@ -363,7 +436,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             }
         }
     } else {
-        out.push(Finding::error("workload", "required", "workload is required"));
+        out.push(Finding::error(
+            "workload",
+            "required",
+            "workload is required",
+        ));
     }
 
     // --- interfaces ---
@@ -381,7 +458,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 let epath = format!("interfaces.endpoints[{i}]");
                 req_str(ep, "name", &epath, out);
                 req_enum(ep, "protocol", &epath, PROTOCOLS, out, "protocol-enum");
-                req_enum(ep, "role", &epath, ENDPOINT_ROLES, out, "endpoint-role-enum");
+                req_enum(
+                    ep,
+                    "role",
+                    &epath,
+                    ENDPOINT_ROLES,
+                    out,
+                    "endpoint-role-enum",
+                );
                 req_enum(ep, "defaultScope", &epath, SCOPES, out, "scope-enum");
                 check_enum(ep, "tlsMode", &epath, TLS_MODES, out, "tls-mode-enum");
                 match get(ep, "containerPort").and_then(as_i64) {
@@ -407,7 +491,12 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 req_str(slot, "version", &spath, out);
                 if let Some(cc) = get(slot, "clientContract") {
                     let cpath = format!("{spath}.clientContract");
-                    if let Some(sq) = get(cc, "sharedQuotaFormula").or_else(|| get(get(cc, "sidecar").unwrap_or(&serde_yaml::Value::Null), "sharedQuotaFormula")) {
+                    if let Some(sq) = get(cc, "sharedQuotaFormula").or_else(|| {
+                        get(
+                            get(cc, "sidecar").unwrap_or(&serde_yaml::Value::Null),
+                            "sharedQuotaFormula",
+                        )
+                    }) {
                         if let Some(s) = as_str(sq) {
                             if s.trim().is_empty() {
                                 out.push(Finding::error(
@@ -458,7 +547,15 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                             out,
                             "port-strategy-enum",
                         );
-                        check_int_range(side, "cpuMillicores", &sp, 0, Some(200), out, "sidecar-cpu");
+                        check_int_range(
+                            side,
+                            "cpuMillicores",
+                            &sp,
+                            0,
+                            Some(200),
+                            out,
+                            "sidecar-cpu",
+                        );
                         check_int_range(side, "memoryMb", &sp, 0, Some(128), out, "sidecar-mem");
                         if let Some(listeners) = get(side, "listeners").and_then(as_seq) {
                             if listeners.is_empty() {
@@ -521,7 +618,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             for (k, v) in reqs {
                 let rpath = format!("interfaces.requires.{}", key_str(k));
                 req_str(v, "capability", &rpath, out);
-                req_enum(v, "dependencyStage", &rpath, DEP_STAGES, out, "dependency-stage-enum");
+                req_enum(
+                    v,
+                    "dependencyStage",
+                    &rpath,
+                    DEP_STAGES,
+                    out,
+                    "dependency-stage-enum",
+                );
                 if get(v, "envMapping").and_then(as_map).is_none() {
                     out.push(Finding::error(
                         format!("{rpath}.envMapping"),
@@ -532,7 +636,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             }
         }
     } else {
-        out.push(Finding::error("interfaces", "required", "interfaces is required"));
+        out.push(Finding::error(
+            "interfaces",
+            "required",
+            "interfaces is required",
+        ));
     }
 
     // --- hardwareAndKernel ---
@@ -553,7 +661,14 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             check_int_range(res, "ephemeralStorageMb", rpath, 0, None, out, "ephemeral");
             // networkQosClass and cpuLimitPolicy have CUE defaults — optional if omitted
             check_enum(res, "networkQosClass", rpath, NETWORK_QOS, out, "qos-enum");
-            check_enum(res, "cpuLimitPolicy", rpath, CPU_LIMIT_POLICY, out, "cpu-limit-enum");
+            check_enum(
+                res,
+                "cpuLimitPolicy",
+                rpath,
+                CPU_LIMIT_POLICY,
+                out,
+                "cpu-limit-enum",
+            );
             if get(res, "minCpuCores").and_then(as_f64).is_none() {
                 out.push(Finding::error(
                     format!("{rpath}.minCpuCores"),
@@ -627,19 +742,25 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 let apath = format!("operations.day2Actions[{i}]");
                 req_str(a, "id", &apath, out);
                 req_str(a, "title", &apath, out);
-                req_enum(a, "category", &apath, DAY2_CATEGORIES, out, "day2-category-enum");
-                req_enum(a, "executionType", &apath, EXEC_TYPES, out, "day2-exec-enum");
+                req_enum(
+                    a,
+                    "category",
+                    &apath,
+                    DAY2_CATEGORIES,
+                    out,
+                    "day2-category-enum",
+                );
+                req_enum(
+                    a,
+                    "executionType",
+                    &apath,
+                    EXEC_TYPES,
+                    out,
+                    "day2-exec-enum",
+                );
                 // MVP: support-role ACL is out of scope (no support contour).
                 check_int_range(a, "cooldownSeconds", &apath, 0, None, out, "cooldown");
-                check_int_range(
-                    a,
-                    "ttlSecondsAfterFinished",
-                    &apath,
-                    0,
-                    None,
-                    out,
-                    "ttl",
-                );
+                check_int_range(a, "ttlSecondsAfterFinished", &apath, 0, None, out, "ttl");
                 if let Some(r) = opt_str(a, "scriptRef") {
                     if !crate::patterns::is_script_ref(r) {
                         out.push(Finding::error(
@@ -652,7 +773,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             }
         }
     } else {
-        out.push(Finding::error("operations", "required", "operations is required"));
+        out.push(Finding::error(
+            "operations",
+            "required",
+            "operations is required",
+        ));
     }
 
     // ===== deep nested rules (full enum / range coverage) =====
@@ -683,7 +808,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 check_int_range(c, "memoryMb", &cp, 1, None, out, "companion-mem");
                 match get(c, "cpuCores").and_then(as_f64) {
                     Some(x) if x > 0.0 => {}
-                    _ => out.push(Finding::error(format!("{cp}.cpuCores"), "cpu-positive", "cpuCores MUST be > 0")),
+                    _ => out.push(Finding::error(
+                        format!("{cp}.cpuCores"),
+                        "cpu-positive",
+                        "cpuCores MUST be > 0",
+                    )),
                 }
             }
         }
@@ -695,7 +824,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
         if let Some(eps) = get(ifaces, "endpoints").and_then(as_seq) {
             for (i, ep) in eps.iter().enumerate() {
                 if let Some(gt) = get(ep, "gatewayTuning") {
-                    deep::check_gateway_tuning(gt, &format!("interfaces.endpoints[{i}].gatewayTuning"), out);
+                    deep::check_gateway_tuning(
+                        gt,
+                        &format!("interfaces.endpoints[{i}].gatewayTuning"),
+                        out,
+                    );
                 }
             }
         }
@@ -704,7 +837,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 let spath = format!("interfaces.provides[{i}]");
                 if let Some(cc) = get(slot, "clientContract") {
                     if let Some(side) = get(cc, "sidecar") {
-                        deep::check_sidecar_extra(side, &format!("{spath}.clientContract.sidecar"), out);
+                        deep::check_sidecar_extra(
+                            side,
+                            &format!("{spath}.clientContract.sidecar"),
+                            out,
+                        );
                     }
                     if get(cc, "exportedTokens").is_none() {
                         out.push(Finding::error(
@@ -715,13 +852,23 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                     }
                 }
                 if let Some(prov) = get(slot, "provisioner") {
-                    deep::check_script_ref_field(prov, "scriptRef", &format!("{spath}.provisioner"), out);
+                    deep::check_script_ref_field(
+                        prov,
+                        "scriptRef",
+                        &format!("{spath}.provisioner"),
+                        out,
+                    );
                 }
             }
         }
         if let Some(reqs) = get(ifaces, "requires").and_then(as_map) {
             for (k, v) in reqs {
-                deep::check_script_ref_field(v, "mountAsFilesPath", &format!("interfaces.requires.{}", key_str(k)), out);
+                deep::check_script_ref_field(
+                    v,
+                    "mountAsFilesPath",
+                    &format!("interfaces.requires.{}", key_str(k)),
+                    out,
+                );
             }
         }
         if let Some(scripts) = get(ifaces, "scripts") {
@@ -764,7 +911,11 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
         if let Some(obs) = get(ops, "observability") {
             if let Some(rules) = get(obs, "localAnomalyRules").and_then(as_seq) {
                 for (i, r) in rules.iter().enumerate() {
-                    deep::check_anomaly_rule(r, &format!("operations.observability.localAnomalyRules[{i}]"), out);
+                    deep::check_anomaly_rule(
+                        r,
+                        &format!("operations.observability.localAnomalyRules[{i}]"),
+                        out,
+                    );
                 }
             }
         }
@@ -777,9 +928,13 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
         }
         if let Some(actions) = get(ops, "day2Actions").and_then(as_seq) {
             for (i, a) in actions.iter().enumerate() {
-                deep::check_script_ref_field(a, "scriptRef", &format!("operations.day2Actions[{i}]"), out);
+                deep::check_script_ref_field(
+                    a,
+                    "scriptRef",
+                    &format!("operations.day2Actions[{i}]"),
+                    out,
+                );
             }
         }
     }
 }
-

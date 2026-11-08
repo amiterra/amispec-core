@@ -51,7 +51,12 @@ pub fn opt_str<'a>(parent: &'a Yaml, key: &str) -> Option<&'a str> {
 }
 
 /// Required non-empty string field; push error if missing.
-pub fn req_str(parent: &Yaml, key: &str, path: &str, out: &mut Vec<crate::Finding>) -> Option<String> {
+pub fn req_str(
+    parent: &Yaml,
+    key: &str,
+    path: &str,
+    out: &mut Vec<crate::Finding>,
+) -> Option<String> {
     match opt_str(parent, key) {
         Some(s) if !s.is_empty() => Some(s.to_string()),
         _ => {
@@ -64,7 +69,6 @@ pub fn req_str(parent: &Yaml, key: &str, path: &str, out: &mut Vec<crate::Findin
         }
     }
 }
-
 
 pub fn check_int_range(
     parent: &Yaml,
