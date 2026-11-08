@@ -6,11 +6,11 @@
 //! silent stub.
 
 use super::{Activation, MaterializeCtx};
+use crate::CompileError;
 use crate::exposure::cilium_envoy::CiliumEnvoy;
 use crate::exposure::cilium_ingress::CiliumIngress;
 use crate::exposure::edge_proxy::EdgeProxy;
 use crate::exposure::l4::{CiliumL4Bgp, K3sServiceLb};
-use crate::CompileError;
 use amispec_schema::LoadBalancer;
 use serde_json::Value;
 
@@ -102,6 +102,7 @@ mod tests {
             proxy_protocol_v2: None,
             http3_quic: None,
             tls: None,
+            vip_reachability: None,
         }
     }
 

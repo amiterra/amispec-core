@@ -4,7 +4,7 @@
 //! Golden regeneration: `AMISPEC_UPDATE_GOLDENS=1 cargo test -p amispec-compile`.
 
 use amispec_compile::{
-    compile, decompile_dir, CompileError, GeneratedFile, Options, PassportIndex, PassportSummary,
+    CompileError, GeneratedFile, Options, PassportIndex, PassportSummary, compile, decompile_dir,
 };
 use amispec_schema::parse_topology;
 use std::path::{Path, PathBuf};
@@ -85,12 +85,14 @@ clusters:
         layer: l7-gateway
         provider: cilium-envoy
         tls: letsencrypt-http01
+        vipReachability: l2-announce
       - id: mqtt-l4
         layer: l4-balancer
         provider: cilium-l4-bgp
         forwardingMode: ebpf-dsr-maglev
         floatingIpRef: fip-01
         proxyProtocolV2: true
+        vipReachability: l2-announce
     components:
       - id: web
         passport: stateless-app
@@ -288,7 +290,7 @@ fn v3_roundtrip_restores_all_exposure_fields() {
     let api = web
         .expose
         .iter()
-        .find(|e| e.endpoint == "web" && e.via_balancer == "main-l7")
+        .find(|e| e.endpoint == "web" && e.via_balancer.ids().contains(&"main-l7"))
         .expect("api expose");
     assert_eq!(api.hostname.as_deref(), Some("example.io"));
     assert_eq!(api.path_prefix.as_deref(), Some("/api/v2"));
@@ -305,7 +307,7 @@ fn v3_roundtrip_restores_all_exposure_fields() {
         .iter()
         .find(|e| e.endpoint == "admin")
         .expect("admin expose");
-    assert_eq!(admin.via_balancer, "main-l7");
+    assert_eq!(admin.via_balancer.ids(), vec!["main-l7"]);
     assert_eq!(admin.subdomain.as_deref(), Some("admin"));
     assert_eq!(admin.scope, "protected");
     let sp = admin.security_policy.as_ref().expect("admin policy");
@@ -314,7 +316,7 @@ fn v3_roundtrip_restores_all_exposure_fields() {
     let l4e = web
         .expose
         .iter()
-        .find(|e| e.via_balancer == "mqtt-l4")
+        .find(|e| e.via_balancer.ids().contains(&"mqtt-l4"))
         .expect("l4 expose");
     assert!(l4e.hostname.is_none() && l4e.subdomain.is_none());
 }
@@ -466,6 +468,100 @@ fn vendored_crd_emitted_once_across_balancers() {
     assert!(
         render.contains("name: main-l7-config") && render.contains("name: standby-l7-config"),
         "each balancer keeps its own GatewayClass config object"
+    );
+}
+
+#[test]
+fn vip_reachability_fail_closed_when_undeclared() {
+    // Design Doc 0025 §3.11: no VIP announcements without an explicit
+    // declaration — absent behaves like `none` plus a warning.
+    let yaml = V3_TOPOLOGY
+        .replace("        vipReachability: l2-announce\n", "")
+        .replace("        vipReachability: l2-announce\n", "");
+    let topo = parse_topology(&yaml).expect("parse");
+    let out = compile(&topo, &passports(), &Options::dry()).expect("compile");
+    let render = render_tree(&out.files);
+    assert!(
+        !render.contains("CiliumL2AnnouncementPolicy"),
+        "undeclared reachability compiles no announcement policy"
+    );
+    assert!(
+        !render.contains("l2announcements"),
+        "helm activation must not enable l2announcements either"
+    );
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("vipReachability is not declared")),
+        "fail-closed is reported as a warning: {:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn l2_policy_is_scoped_to_balancer_services() {
+    let out = compile_yaml(V3_TOPOLOGY);
+    let render = render_tree(&out.files);
+    assert!(
+        !render.contains("name: amispec-l2"),
+        "no cluster-wide policy"
+    );
+    // L7: the generated gateway Service only.
+    assert!(render.contains("name: main-l7-l2"));
+    assert!(render.contains("cilium-gateway-main-l7"));
+    // L4: only this balancer's endpoint Services.
+    assert!(render.contains("name: mqtt-l4-l2"));
+    assert!(render.contains("io.kubernetes.service.name"));
+    assert!(render.contains("web-mqtt"));
+    // The declared mode is recorded for round-trip.
+    assert!(render.contains("amispec.io/vip-reachability: l2-announce"));
+}
+
+#[test]
+fn l2_announce_conflicts_with_upstream_edge() {
+    // Origin hiding and LAN ARP announcements contradict each other.
+    let yaml = V3_TOPOLOGY.replace(
+        "        tls: letsencrypt-http01\n        vipReachability: l2-announce",
+        "        tls: letsencrypt-http01\n        upstreamEdge: edge-01\n        vipReachability: l2-announce",
+    );
+    let topo = parse_topology(&yaml).expect("parse");
+    let err = compile(&topo, &passports(), &Options::dry()).expect_err("conflict");
+    assert!(
+        err.to_string().contains("l2-announce") && err.to_string().contains("upstreamEdge"),
+        "conflict error mentions both sides: {err}"
+    );
+}
+
+#[test]
+fn multi_via_compiles_one_route_per_balancer() {
+    let yaml = V3_TOPOLOGY
+        .replace(
+            "      - id: mqtt-l4",
+            "      - id: standby-l7\n        layer: l7-gateway\n        provider: cilium-envoy\n        tls: letsencrypt-http01\n        vipReachability: l2-announce\n      - id: mqtt-l4",
+        )
+        .replace(
+            "          - endpoint: admin",
+            "          - endpoint: web\n            viaBalancer: [main-l7, standby-l7]\n            scope: public\n            subdomain: ha\n          - endpoint: admin",
+        );
+    let out = compile_yaml(&yaml);
+    let render = render_tree(&out.files);
+    assert!(
+        render.contains("name: web-web-main-l7") && render.contains("name: web-web-standby-l7"),
+        "HA exposure yields one uniquely named route per balancer"
+    );
+}
+
+#[test]
+fn multi_via_on_l4_is_rejected() {
+    let yaml = V3_TOPOLOGY.replace(
+        "            viaBalancer: mqtt-l4",
+        "            viaBalancer: [mqtt-l4, main-l7]",
+    );
+    let topo = parse_topology(&yaml).expect("parse");
+    let err = compile(&topo, &passports(), &Options::dry()).expect_err("L4 multi-via");
+    assert!(
+        err.to_string().contains("l7-gateway"),
+        "error explains the L7-only rule: {err}"
     );
 }
 

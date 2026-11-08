@@ -139,16 +139,6 @@ spec:
   values:
     installCRDs: true
 ---
-apiVersion: cilium.io/v2alpha1
-kind: CiliumL2AnnouncementPolicy
-metadata:
-  labels:
-    amispec.io/cluster-id: local
-    amispec.io/stage: 02-operators-and-networking
-  name: amispec-l2
-spec:
-  loadBalancerIPs: true
----
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -156,6 +146,7 @@ metadata:
     amispec.io/lb-provider: cilium-envoy
     amispec.io/tls: letsencrypt-http01
     amispec.io/tls-mode-resolved: letsencrypt-http01
+    amispec.io/vip-reachability: l2-announce
   labels:
     amispec.io/cluster-id: local
     amispec.io/lb-id: main-l7
@@ -182,6 +173,7 @@ metadata:
     amispec.io/lb-provider: cilium-envoy
     amispec.io/tls: letsencrypt-http01
     amispec.io/tls-mode-resolved: letsencrypt-http01
+    amispec.io/vip-reachability: l2-announce
   labels:
     amispec.io/cluster-id: local
     amispec.io/lb-id: main-l7
@@ -204,6 +196,7 @@ metadata:
     amispec.io/lb-provider: cilium-envoy
     amispec.io/tls: letsencrypt-http01
     amispec.io/tls-mode-resolved: letsencrypt-http01
+    amispec.io/vip-reachability: l2-announce
   labels:
     amispec.io/cluster-id: local
     amispec.io/lb-id: main-l7
@@ -218,6 +211,21 @@ spec:
     kind: ClusterIssuer
     name: main-l7
   secretName: main-l7-example-io-tls
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: main-l7
+    amispec.io/lb-layer: l7-gateway
+    amispec.io/stage: 02-operators-and-networking
+  name: main-l7-l2
+spec:
+  loadBalancerIPs: true
+  serviceSelector:
+    matchLabels:
+      io.kubernetes.service.name: cilium-gateway-main-l7
 ---
 apiVersion: v1
 data:
@@ -235,6 +243,7 @@ metadata:
     amispec.io/lb-provider: cilium-l4-bgp
     amispec.io/proxy-protocol-v2: 'true'
     amispec.io/tls-mode-resolved: none
+    amispec.io/vip-reachability: l2-announce
   labels:
     amispec.io/cluster-id: local
     amispec.io/lb-id: mqtt-l4
@@ -242,6 +251,24 @@ metadata:
     amispec.io/stage: 02-operators-and-networking
   name: mqtt-l4-l4-prereqs
   namespace: flux-system
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  labels:
+    amispec.io/cluster-id: local
+    amispec.io/lb-id: mqtt-l4
+    amispec.io/lb-layer: l4-balancer
+    amispec.io/stage: 02-operators-and-networking
+  name: mqtt-l4-l2
+spec:
+  loadBalancerIPs: true
+  serviceSelector:
+    matchExpressions:
+    - key: io.kubernetes.service.name
+      operator: In
+      values:
+      - web-mqtt
 === clusters/local/02-operators-and-networking/gateways.yaml ===
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -572,6 +599,7 @@ metadata:
     amispec.io/lb-provider: cilium-envoy
     amispec.io/tls: letsencrypt-http01
     amispec.io/tls-mode-resolved: letsencrypt-http01
+    amispec.io/vip-reachability: l2-announce
   labels:
     amispec.io/cluster-id: local
     amispec.io/lb-id: main-l7
@@ -593,6 +621,7 @@ metadata:
     amispec.io/lb-provider: cilium-envoy
     amispec.io/tls: letsencrypt-http01
     amispec.io/tls-mode-resolved: letsencrypt-http01
+    amispec.io/vip-reachability: l2-announce
   labels:
     amispec.io/cluster-id: local
     amispec.io/lb-id: main-l7
@@ -675,6 +704,7 @@ metadata:
     amispec.io/lb-provider: cilium-l4-bgp
     amispec.io/proxy-protocol-v2: 'true'
     amispec.io/tls-mode-resolved: none
+    amispec.io/vip-reachability: l2-announce
   labels:
     amispec.io/cluster-id: local
     amispec.io/lb-id: mqtt-l4

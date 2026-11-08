@@ -48,6 +48,8 @@ pub const LABEL_FLOATING_IP_REF: &str = "amispec.io/floating-ip-ref";
 pub const LABEL_PROXY_PROTOCOL_V2: &str = "amispec.io/proxy-protocol-v2";
 /// `loadBalancers[].http3Quic`.
 pub const LABEL_HTTP3_QUIC: &str = "amispec.io/http3-quic";
+/// `loadBalancers[].vipReachability` (l2-announce | bgp | none).
+pub const LABEL_VIP_REACHABILITY: &str = "amispec.io/vip-reachability";
 /// `expose[].endpoint` (passport endpoint contract name).
 pub const LABEL_ENDPOINT: &str = "amispec.io/endpoint";
 /// `expose[].viaBalancer`.

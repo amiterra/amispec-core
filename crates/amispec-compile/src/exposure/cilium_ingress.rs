@@ -12,7 +12,7 @@ use super::registry::{BalancerMaterializer, Materialized};
 use super::*;
 use crate::CompileError;
 use amispec_schema::LoadBalancer;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub struct CiliumIngress;
 
@@ -26,7 +26,8 @@ impl BalancerMaterializer for CiliumIngress {
                 envoy: true,
                 gateway_api: false,
                 ingress_controller: true,
-                l2_announcements: true,
+                // Decided centrally from the declared `vipReachability`.
+                l2_announcements: false,
             },
             ..Default::default()
         };
@@ -107,13 +108,14 @@ impl BalancerMaterializer for CiliumIngress {
             if !filters.is_empty() {
                 annotations.insert(
                     "amispec.io/cors".into(),
-                    json!(ex
-                        .expose
-                        .security_policy
-                        .as_ref()
-                        .and_then(|sp| sp.cors_allowed_origins.as_ref())
-                        .map(|o| o.join(", "))
-                        .unwrap_or_default()),
+                    json!(
+                        ex.expose
+                            .security_policy
+                            .as_ref()
+                            .and_then(|sp| sp.cors_allowed_origins.as_ref())
+                            .map(|o| o.join(", "))
+                            .unwrap_or_default()
+                    ),
                 );
             }
             out.warnings.extend(warnings);

@@ -1175,6 +1175,16 @@ pub enum CompileError {
         cluster: String,
     },
     #[error(
+        "expose `{endpoint}` of component `{component}` declares several viaBalancer ids, \
+         but multi-via is only supported for l7-gateway balancers (one L4 Service per edge)"
+    )]
+    MultiViaOnL4 { endpoint: String, component: String },
+    #[error(
+        "balancer `{lb_id}` declares vipReachability `l2-announce` together with \
+         upstreamEdge — announcing the VIP on the LAN contradicts origin hiding"
+    )]
+    VipReachabilityConflict { lb_id: String },
+    #[error(
         "cannot resolve backend port for expose `{endpoint}` of component `{component}` \
          (passport `{passport}`): {reason}"
     )]

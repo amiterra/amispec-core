@@ -11,7 +11,7 @@ use super::registry::{BalancerMaterializer, Materialized};
 use super::*;
 use crate::CompileError;
 use amispec_schema::LoadBalancer;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub struct CiliumL4Bgp;
 pub struct K3sServiceLb;

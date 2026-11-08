@@ -116,9 +116,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                         .entry(cid.clone())
                         .or_insert_with(|| blank_component(&cid));
                     if let Some(ex) = route_to_expose(doc) {
-                        if !comp.expose.iter().any(|e| e.endpoint == ex.endpoint) {
-                            comp.expose.push(ex);
-                        }
+                        push_expose(comp, ex);
                     }
                 }
             }
@@ -212,9 +210,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                     .entry(cid.clone())
                     .or_insert_with(|| blank_component(&cid));
                 if let Some(ex) = route_to_expose(doc) {
-                    if !comp.expose.iter().any(|e| e.endpoint == ex.endpoint) {
-                        comp.expose.push(ex);
-                    }
+                    push_expose(comp, ex);
                 }
             }
             "ConfigMap" => {
@@ -408,6 +404,32 @@ fn node_from_tuning(doc: &Value) -> Option<Node> {
     })
 }
 
+/// Push a reconstructed `expose[]` entry, merging multi-via round-trips:
+/// one route per balancer becomes one expose with `viaBalancer: [..]`.
+fn push_expose(comp: &mut ComponentInstance, ex: Expose) {
+    use amispec_schema::ViaBalancer;
+    if let Some(existing) = comp.expose.iter_mut().find(|e| e.endpoint == ex.endpoint) {
+        let mut ids: Vec<String> = existing
+            .via_balancer
+            .ids()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for id in ex.via_balancer.ids() {
+            if !ids.iter().any(|i| i == id) {
+                ids.push(id.to_string());
+            }
+        }
+        existing.via_balancer = if ids.len() == 1 {
+            ViaBalancer::One(ids.remove(0))
+        } else {
+            ViaBalancer::Many(ids)
+        };
+        return;
+    }
+    comp.expose.push(ex);
+}
+
 /// Restore a `LoadBalancer` from provenance labels/annotations (Design Doc
 /// 0025 §2.2). Sources: GatewayClass/Gateway (l7), CiliumLoadBalancerIPPool
 /// and L4 Services (l4), trust-border ConfigMaps (edge-proxy).
@@ -430,6 +452,14 @@ fn lb_from_provenance(doc: &Value) -> Option<LoadBalancer> {
         proxy_protocol_v2: get_str(annotations, LABEL_PROXY_PROTOCOL_V2).map(|s| s == "true"),
         http3_quic: get_str(annotations, LABEL_HTTP3_QUIC).map(|s| s == "true"),
         tls: get_str(annotations, LABEL_LB_TLS),
+        vip_reachability: get_str(annotations, LABEL_VIP_REACHABILITY).and_then(|s| {
+            match s.as_str() {
+                "l2-announce" => Some(amispec_schema::VipReachability::L2Announce),
+                "bgp" => Some(amispec_schema::VipReachability::Bgp),
+                "none" => Some(amispec_schema::VipReachability::None),
+                _ => None,
+            }
+        }),
     })
 }
 
@@ -599,7 +629,9 @@ fn route_to_expose(doc: &Value) -> Option<Expose> {
     });
     Some(Expose {
         endpoint,
-        via_balancer: get_str(labels, LABEL_VIA_BALANCER).unwrap_or_default(),
+        via_balancer: amispec_schema::ViaBalancer::One(
+            get_str(labels, LABEL_VIA_BALANCER).unwrap_or_default(),
+        ),
         scope: get_str(labels, LABEL_SCOPE).unwrap_or_else(|| "public".into()),
         subdomain,
         hostname,

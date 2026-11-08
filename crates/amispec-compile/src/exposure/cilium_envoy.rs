@@ -44,7 +44,9 @@ impl BalancerMaterializer for CiliumEnvoy {
                 envoy: true,
                 gateway_api: true,
                 ingress_controller: false,
-                l2_announcements: true,
+                // L2 announcements are decided centrally from the DECLARED
+                // `vipReachability` (Design Doc 0025 §3.11) — never here.
+                l2_announcements: false,
             },
             ..Default::default()
         };
@@ -231,11 +233,18 @@ impl BalancerMaterializer for CiliumEnvoy {
                 json!([{ "name": ex.component.id, "port": ex.backend_port }]),
             );
 
+            // Multi-via exposes compile one route per balancer — suffix keeps
+            // object names unique across those routes.
+            let route_name = if ex.expose.via_balancer.ids().len() > 1 {
+                format!("{}-{}-{}", ex.component.id, ex.expose.endpoint, ctx.lb.id)
+            } else {
+                format!("{}-{}", ex.component.id, ex.expose.endpoint)
+            };
             out.objects.push(json!({
                 "apiVersion": "gateway.networking.k8s.io/v1",
                 "kind": "HTTPRoute",
                 "metadata": {
-                    "name": format!("{}-{}", ex.component.id, ex.expose.endpoint),
+                    "name": route_name,
                     "namespace": ex.component.zone.clone().unwrap_or_else(|| "default".into()),
                     "labels": Value::Object(labels),
                     "annotations": Value::Object(annotations),

@@ -396,13 +396,48 @@ pub struct SecurityPolicy {
     pub allow_anonymous: Option<bool>,
 }
 
+/// Balancer reference(s) on an `expose[]` entry: one id, or several when the
+/// same endpoint is exposed through multiple balancers (HA).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ViaBalancer {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl ViaBalancer {
+    /// All declared balancer ids, in declaration order.
+    pub fn ids(&self) -> Vec<&str> {
+        match self {
+            ViaBalancer::One(id) => vec![id.as_str()],
+            ViaBalancer::Many(ids) => ids.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// How external clients physically reach the balancer VIP (Design Doc 0025
+/// §3.11: network prerequisites are *declared*, never invented by the
+/// compiler). Absent = `none` (fail-closed) + a compile warning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VipReachability {
+    /// ARP announcements via Cilium L2 (compiler materializes a scoped
+    /// `CiliumL2AnnouncementPolicy` per balancer).
+    L2Announce,
+    /// BGP routing to the VIP (Day-2 peering; compiler emits only a checklist).
+    Bgp,
+    /// No announcements: reachability comes from elsewhere (edge / manual).
+    #[default]
+    None,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Expose {
     /// Named `interfaces.endpoints[]` entry of the component passport;
     /// its `containerPort` becomes the route backend port (portless ADR 0009).
     pub endpoint: String,
     #[serde(rename = "viaBalancer")]
-    pub via_balancer: String,
+    pub via_balancer: ViaBalancer,
     pub scope: String,
     /// Expands to FQDN `<subdomain>.<cluster.domain>`.
     #[serde(default)]
@@ -435,6 +470,10 @@ pub struct LoadBalancer {
     pub http3_quic: Option<bool>,
     #[serde(default)]
     pub tls: Option<String>,
+    /// Declared VIP reachability model; `None` (absent) behaves like
+    /// `VipReachability::None` plus a compile warning (fail-closed).
+    #[serde(default, rename = "vipReachability")]
+    pub vip_reachability: Option<VipReachability>,
 }
 
 /// Inbound endpoint contract from `interfaces.endpoints[]` of a ComponentPassport.

@@ -26,10 +26,10 @@ use registry::materializer_for;
 
 pub use registry::BalancerMaterializer;
 
+use crate::CompileError;
 use crate::passport::{PassportIndex, PassportSummary};
 use crate::provenance::*;
-use crate::CompileError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 /// Namespace of the compiled Gateway objects (Flux control plane).
@@ -101,35 +101,55 @@ pub fn resolve_exposures<'a>(
         let pin = crate::passport_pin(&comp.passport, &comp.version, comp.passport_rev);
         let summary = passports.get(&comp.passport);
         for ex in &comp.expose {
-            let balancer = cluster
-                .load_balancers
-                .iter()
-                .find(|lb| lb.id == ex.via_balancer)
-                .ok_or_else(|| CompileError::UnresolvedBalancer {
-                    via_balancer: ex.via_balancer.clone(),
-                    cluster: cluster.id.clone(),
-                })?;
+            let via_ids = ex.via_balancer.ids();
+            // Multi-via is an L7 HA story (several edge Gateways); an L4
+            // exposure names exactly one balancer (one LB Service per edge).
+            if via_ids.len() > 1 {
+                let l4 = via_ids.iter().any(|id| {
+                    cluster
+                        .load_balancers
+                        .iter()
+                        .find(|lb| lb.id == *id)
+                        .is_some_and(|lb| lb.layer != "l7-gateway")
+                });
+                if l4 {
+                    return Err(CompileError::MultiViaOnL4 {
+                        endpoint: ex.endpoint.clone(),
+                        component: comp.id.clone(),
+                    });
+                }
+            }
+            for via_id in via_ids {
+                let balancer = cluster
+                    .load_balancers
+                    .iter()
+                    .find(|lb| lb.id == via_id)
+                    .ok_or_else(|| CompileError::UnresolvedBalancer {
+                        via_balancer: via_id.to_string(),
+                        cluster: cluster.id.clone(),
+                    })?;
 
-            let backend_port = resolve_port(summary, comp, ex)?;
+                let backend_port = resolve_port(summary, comp, ex)?;
 
-            let l7 = balancer.layer == "l7-gateway";
-            let (host, host_source) = if l7 {
-                (Some(effective_host(comp, cluster, ex)), host_source(ex))
-            } else {
-                (None, "none")
-            };
+                let l7 = balancer.layer == "l7-gateway";
+                let (host, host_source) = if l7 {
+                    (Some(effective_host(comp, cluster, ex)), host_source(ex))
+                } else {
+                    (None, "none")
+                };
 
-            out.push(ResolvedExposure {
-                cluster,
-                component: comp,
-                expose: ex,
-                balancer,
-                host,
-                host_source,
-                path: effective_path(ex),
-                backend_port,
-                pin: pin.clone(),
-            });
+                out.push(ResolvedExposure {
+                    cluster,
+                    component: comp,
+                    expose: ex,
+                    balancer,
+                    host,
+                    host_source,
+                    path: effective_path(ex),
+                    backend_port,
+                    pin: pin.clone(),
+                });
+            }
         }
     }
     Ok(out)
@@ -395,19 +415,53 @@ pub fn materialize(
         let policies = mat.edge_policies(&ctx)?;
         artifacts.edge_policies.extend(policies.objects);
         artifacts.warnings.extend(policies.warnings);
+
+        // VIP reachability (Design Doc 0025 §3.11): network prerequisites are
+        // DECLARED, never inferred. Absent = `none` (fail-closed) + warning.
+        match lb.vip_reachability {
+            None => artifacts.warnings.push(format!(
+                "balancer `{}`: vipReachability is not declared — no VIP \
+                 announcements are compiled (fail-closed). Declare \
+                 `vipReachability: l2-announce` for LAN/ARP reachability or \
+                 `vipReachability: bgp` for routed VIPs",
+                lb.id
+            )),
+            Some(amispec_schema::VipReachability::None) => {}
+            Some(amispec_schema::VipReachability::Bgp) => artifacts.warnings.push(format!(
+                "balancer `{}`: vipReachability `bgp` is a Day-2 network \
+                 prerequisite — configure BGP peering for the VIP yourself; \
+                 the compiler emits no announcement policy",
+                lb.id
+            )),
+            Some(amispec_schema::VipReachability::L2Announce) => {
+                if lb.upstream_edge.is_some() {
+                    return Err(CompileError::VipReachabilityConflict {
+                        lb_id: lb.id.clone(),
+                    });
+                }
+                let svc_names: Vec<String> = group
+                    .iter()
+                    .map(|ex| format!("{}-{}", ex.component.id, ex.expose.endpoint))
+                    .collect();
+                artifacts
+                    .activation
+                    .push(l2_announcement_policy(lb, &svc_names, cluster, provenance));
+                helm_flags.l2_announcements = true;
+                artifacts.warnings.push(format!(
+                    "balancer `{}`: VIP is reachable via L2 ARP announcements — \
+                     one active node per VIP, failover ~10-20s (lease 15/5/2s); \
+                     for many VIPs or routed networks prefer \
+                     `vipReachability: bgp`",
+                    lb.id
+                ));
+            }
+        }
     }
 
     // one HelmChartConfig per cluster (merge into the ami init HelmChart)
     if helm_flags.any() {
         let cfg = helm_chart_config(cluster, &helm_flags, provenance);
         artifacts.activation.insert(0, cfg);
-    }
-    // L2 announcements policy: Cilium answers ARP for LoadBalancer IPs —
-    // the reachability half of the balancer datapath on an L2 segment.
-    if helm_flags.l2_announcements {
-        artifacts
-            .activation
-            .insert(1, l2_announcement_policy(cluster, provenance));
     }
     // one cert-manager chain per cluster (the single non-baseline dependency)
     if need_cert_manager {
@@ -610,19 +664,43 @@ fn service_port_name(endpoint: &str, used: &mut Vec<String>) -> String {
     name
 }
 
-/// `CiliumL2AnnouncementPolicy`: announce LoadBalancer IPs on the node
-/// network (ARP). Cluster-scoped, one per cluster.
-fn l2_announcement_policy(cluster: &Cluster, provenance: bool) -> Value {
-    let labels = exposure_labels(&cluster.id, "02-operators-and-networking", provenance);
+/// Scoped `CiliumL2AnnouncementPolicy`: ARP-announce ONLY the services of
+/// this balancer (Design Doc 0025 §3.11 — declared reachability, minimal
+/// network surface). L7: the generated `cilium-gateway-<lb-id>` Service;
+/// L4: the generated per-endpoint Services via the reserved
+/// `io.kubernetes.service.name` selector keys.
+fn l2_announcement_policy(
+    lb: &LoadBalancer,
+    svc_names: &[String],
+    cluster: &Cluster,
+    provenance: bool,
+) -> Value {
+    let labels = lb_labels(&cluster.id, lb, STAGE_OPS, provenance);
+    let service_selector = if lb.layer == "l7-gateway" {
+        json!({
+            "matchLabels": {
+                "io.kubernetes.service.name": format!("cilium-gateway-{}", lb.id),
+            }
+        })
+    } else {
+        json!({
+            "matchExpressions": [{
+                "key": "io.kubernetes.service.name",
+                "operator": "In",
+                "values": svc_names,
+            }]
+        })
+    };
     json!({
         "apiVersion": "cilium.io/v2alpha1",
         "kind": "CiliumL2AnnouncementPolicy",
         "metadata": {
-            "name": "amispec-l2",
+            "name": format!("{}-l2", lb.id),
             "labels": Value::Object(labels),
         },
         "spec": {
             "loadBalancerIPs": true,
+            "serviceSelector": service_selector,
         }
     })
 }
@@ -724,6 +802,14 @@ pub fn lb_annotations(
     if let Some(h3) = lb.http3_quic {
         ann.insert(LABEL_HTTP3_QUIC.into(), json!(h3.to_string()));
     }
+    if let Some(vr) = lb.vip_reachability {
+        let s = match vr {
+            amispec_schema::VipReachability::L2Announce => "l2-announce",
+            amispec_schema::VipReachability::Bgp => "bgp",
+            amispec_schema::VipReachability::None => "none",
+        };
+        ann.insert(LABEL_VIP_REACHABILITY.into(), json!(s));
+    }
     ann
 }
 
@@ -773,7 +859,9 @@ pub fn route_labels(
         labels.insert(LABEL_COMPONENT_ID.into(), json!(ex.component.id));
         labels.insert(LABEL_PASSPORT.into(), json!(ex.pin));
         labels.insert(LABEL_ENDPOINT.into(), json!(ex.expose.endpoint));
-        labels.insert(LABEL_VIA_BALANCER.into(), json!(ex.expose.via_balancer));
+        // Concrete balancer of THIS route (an expose with several viaBalancer
+        // ids yields one route per balancer).
+        labels.insert(LABEL_VIA_BALANCER.into(), json!(ex.balancer.id));
         labels.insert(LABEL_SCOPE.into(), json!(ex.expose.scope));
     }
     labels
@@ -901,6 +989,7 @@ mod tests {
             proxy_protocol_v2: None,
             http3_quic: Some(true),
             tls: tls.map(|s| s.to_string()),
+            vip_reachability: None,
         }
     }
 
@@ -978,7 +1067,7 @@ mod tests {
     fn ex(subdomain: Option<&str>, hostname: Option<&str>) -> Expose {
         Expose {
             endpoint: "web".into(),
-            via_balancer: "l7".into(),
+            via_balancer: amispec_schema::ViaBalancer::One("l7".into()),
             scope: "public".into(),
             subdomain: subdomain.map(|s| s.to_string()),
             hostname: hostname.map(|s| s.to_string()),
