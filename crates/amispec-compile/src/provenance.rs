@@ -72,12 +72,13 @@ pub const LABEL_HEADLESS_BASE_EXIT: &str = "amispec.io/headless-base-exit";
 /// Prefix for readiness gate labels.
 pub const TUNED_PREFIX: &str = "tuned.amispec.io";
 
-/// Canonical passport pin `id.version-rev{N}` — **label-safe**.
-///
-/// The human shorthand is `id@rev`, but the pin is also a Kubernetes label
-/// value (`amispec.io/passport`), where `@` is illegal
-/// (`[A-Za-z0-9_.-]` only). The separator is `.` — passport ids are slugs
-/// without dots, so the first dot splits id from version unambiguously.
+/// Canonical passport pin `publisher.id.version-rev{N}` — **label-safe**
+/// (GR-PIN-001). The human shorthand is `publisher/id@rev`; the pin doubles
+/// as a Kubernetes label value (`amispec.io/passport`), where `/` and `@`
+/// are illegal (`[A-Za-z0-9_.-]` only) — so the `/` of the two-level ref
+/// becomes `.`. `publisher` and `id` never contain dots (GR-META-002) and
+/// `version` is sanitized, so parsing is unambiguous: first two dot
+/// segments are the ref, the rest is the version.
 pub fn passport_pin(id: &str, version: &str, rev: u32) -> String {
     let safe_version: String = version
         .chars()
@@ -89,15 +90,25 @@ pub fn passport_pin(id: &str, version: &str, rev: u32) -> String {
             }
         })
         .collect();
-    format!("{id}.{safe_version}-rev{rev}")
+    let label_id = id.replace('/', ".");
+    format!("{label_id}.{safe_version}-rev{rev}")
 }
 
-/// Parse `id.version-rev{N}` back into `(id, version, rev)`.
+/// Parse `publisher.id.version-rev{N}` back into `(publisher/id, version, rev)`.
 pub fn parse_passport_pin(pin: &str) -> Option<(String, String, u32)> {
     let (left, rev) = pin.rsplit_once("-rev")?;
     let rev: u32 = rev.parse().ok()?;
-    let (id, version) = left.split_once('.')?;
-    Some((id.to_string(), version.to_string(), rev))
+    let mut parts = left.splitn(3, '.');
+    let publisher = parts.next()?;
+    let id = parts.next()?;
+    let version = parts.next()?;
+    if publisher.is_empty() || id.is_empty() || version.is_empty() {
+        return None;
+    }
+    if !version.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some((format!("{publisher}/{id}"), version.to_string(), rev))
 }
 
 #[cfg(test)]
@@ -106,20 +117,20 @@ mod tests {
 
     #[test]
     fn passport_pin_roundtrip() {
-        let pin = passport_pin("postgresql", "18.0.0", 6);
-        assert_eq!(pin, "postgresql.18.0.0-rev6");
+        let pin = passport_pin("amiterra/postgresql", "18.0.0", 6);
+        assert_eq!(pin, "amiterra.postgresql.18.0.0-rev6");
         let (id, ver, rev) = parse_passport_pin(&pin).unwrap();
         assert_eq!(
             (id.as_str(), ver.as_str(), rev),
-            ("postgresql", "18.0.0", 6)
+            ("amiterra/postgresql", "18.0.0", 6)
         );
     }
 
     #[test]
     fn passport_pin_is_label_safe() {
         // Kubernetes label values: [A-Za-z0-9_.-], start/end alphanumeric.
-        let pin = passport_pin("stateless-app", "1.0.0", 1);
-        assert_eq!(pin, "stateless-app.1.0.0-rev1");
+        let pin = passport_pin("amiterra/stateless-app", "1.0.0", 1);
+        assert_eq!(pin, "amiterra.stateless-app.1.0.0-rev1");
         let ok = pin
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
@@ -133,8 +144,8 @@ mod tests {
                 .is_some_and(|c| c.is_ascii_alphanumeric());
         assert!(ok, "pin `{pin}` must be a valid label value");
         // exotic versions collapse to '_' but stay reversible as a whole
-        let weird = passport_pin("app", "1.0.0+x", 2);
-        assert_eq!(weird, "app.1.0.0_x-rev2");
+        let weird = passport_pin("test/app", "1.0.0+x", 2);
+        assert_eq!(weird, "test.app.1.0.0_x-rev2");
         assert_eq!(parse_passport_pin(&weird).unwrap().1, "1.0.0_x");
     }
 
@@ -144,6 +155,8 @@ mod tests {
         assert!(parse_passport_pin("no-separator").is_none());
         assert!(parse_passport_pin("id.ver").is_none());
         assert!(parse_passport_pin("id.ver-revX").is_none());
-        assert!(parse_passport_pin(".ver-rev1").is_some()); // empty id allowed
+        assert!(parse_passport_pin(".ver-rev1").is_none()); // empty segment
+        assert!(parse_passport_pin("a.b.-rev1").is_none()); // empty version
+        assert!(parse_passport_pin("a.b..x-rev1").is_none()); // version not alnum-first
     }
 }

@@ -48,7 +48,13 @@ fn passports() -> PassportIndex {
     let raw = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: stateless-app, name: App, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+metadata: { id: stateless-app, publisher: test-org, title: App, description: Test fixture, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+workload:
+  engine: k8s-deployment
+  priorityClass: stateless-web
+  container:
+    image: docker.io/library/busybox:stable
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 interfaces:
   egressDefaultMode: graph-only
   endpoints:
@@ -68,7 +74,7 @@ interfaces:
 const V3_TOPOLOGY: &str = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: exposure-demo, organization: example-org }
+metadata: { publisher: test-org, projectId: exposure-demo, organization: example-org }
 clusters:
   - id: local
     name: Demo
@@ -95,7 +101,7 @@ clusters:
         vipReachability: l2-announce
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         zone: dmz-public
@@ -117,7 +123,7 @@ clusters:
             viaBalancer: mqtt-l4
             scope: public
       - id: keycloak
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -130,7 +136,7 @@ clusters:
 const ZERO_TOPOLOGY: &str = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: headless, organization: example-org }
+metadata: { publisher: test-org, projectId: headless, organization: example-org }
 clusters:
   - id: local
     name: Demo
@@ -146,7 +152,7 @@ clusters:
       - { id: main-l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }

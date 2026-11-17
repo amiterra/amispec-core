@@ -7,7 +7,7 @@
 //! recompiling `catalog + topology` and comparing [`Bundle::tree_hash`].
 //!
 //! ```text
-//! catalog/<id>/rev<N>.yaml          # passport pins (content + sha256)
+//! catalog/passports/<publisher>/<id>/rev<N>.yaml   # passport pins (content + sha256)
 //! clusters/<id>/topology.yaml       # TopologyBlueprint — source of truth
 //! clusters/<id>/01..06/…            # compiled stages (Flux input)
 //! _intent/<change-id>.yaml          # audit journal (written at apply time)
@@ -42,7 +42,8 @@ pub struct CatalogPin {
     /// `sha256:<hex>` of [`Self::content`].
     #[serde(rename = "sha256")]
     pub sha256: String,
-    /// Repository path the pin is written to: `catalog/<id>/rev<N>.yaml`.
+    /// Repository path the pin is written to:
+    /// `catalog/passports/<publisher>/<id>/rev<N>.yaml` (GR-CAT-001).
     pub path: String,
     /// Exact passport YAML (byte-for-byte the catalog content).
     pub content: String,
@@ -79,7 +80,10 @@ impl CatalogPin {
             version: summary.version.clone(),
             rev: summary.passport_rev,
             sha256: hash_content(raw),
-            path: format!("catalog/{}/rev{}.yaml", summary.id, summary.passport_rev),
+            path: format!(
+                "catalog/passports/{}/rev{}.yaml",
+                summary.id, summary.passport_rev
+            ),
             content: raw.to_string(),
         }
     }
@@ -307,7 +311,7 @@ mod tests {
     const TOPOLOGY: &str = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: demo, organization: ex }
+metadata: { publisher: test-org, projectId: demo, organization: ex }
 clusters:
   - id: c0
     name: Demo
@@ -323,7 +327,7 @@ clusters:
       - { id: main-l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -331,7 +335,7 @@ clusters:
         expose:
           - { endpoint: web, viaBalancer: main-l7, scope: public, hostname: app.example.io }
       - id: db
-        passport: postgresql
+        passport: test-org/postgresql
         version: "18.0.0"
         passportRev: 6
         topology: { mode: standalone }
@@ -343,7 +347,13 @@ clusters:
     const WEB_PASSPORT: &str = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: stateless-app, name: Web, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+metadata: { id: stateless-app, publisher: test-org, title: Web, description: Test fixture, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+workload:
+  engine: k8s-deployment
+  priorityClass: stateless-web
+  container:
+    image: docker.io/library/busybox:stable
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 interfaces:
   egressDefaultMode: graph-only
   endpoints:
@@ -355,7 +365,13 @@ interfaces:
     const DB_PASSPORT: &str = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: postgresql, name: PG, version: "18.0.0", passportRev: 6, category: database, archetype: operator-cluster }
+metadata: { id: postgresql, publisher: test-org, title: PG, description: Test fixture, version: "18.0.0", passportRev: 6, category: database, archetype: operator-cluster }
+workload:
+  engine: operator-crd
+  priorityClass: stateless-web
+  container:
+    image: docker.io/library/busybox:stable
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 interfaces:
   egressDefaultMode: graph-only
   endpoints: []
@@ -381,9 +397,9 @@ interfaces:
         let b = bundle();
         assert_eq!(b.cluster_id, "c0");
         assert_eq!(b.catalog.len(), 2);
-        assert_eq!(b.catalog[0].id, "postgresql");
-        assert_eq!(b.catalog[0].path, "catalog/postgresql/rev6.yaml");
-        assert_eq!(b.catalog[1].path, "catalog/stateless-app/rev1.yaml");
+        assert_eq!(b.catalog[0].id, "test-org/postgresql");
+        assert_eq!(b.catalog[0].path, "catalog/passports/test-org/postgresql/rev6.yaml");
+        assert_eq!(b.catalog[1].path, "catalog/passports/test-org/stateless-app/rev1.yaml");
         assert_eq!(b.topology_path, "clusters/c0/topology.yaml");
         assert!(b.topology_yaml.contains("kind: TopologyBlueprint"));
         assert!(
@@ -392,7 +408,7 @@ interfaces:
                 .any(|f| f.relative_path.contains("05-applications"))
         );
         let paths: Vec<&str> = b.repo_files().iter().map(|(p, _)| *p).collect();
-        assert!(paths.contains(&"catalog/postgresql/rev6.yaml"));
+        assert!(paths.contains(&"catalog/passports/test-org/postgresql/rev6.yaml"));
         assert!(paths.contains(&"clusters/c0/topology.yaml"));
         // repo files are sorted → deterministic writer input
         assert!(paths.windows(2).all(|w| w[0] <= w[1]));

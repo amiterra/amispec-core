@@ -3,7 +3,7 @@
 pub mod cue;
 pub mod deep;
 pub mod exposure;
-mod passport;
+pub mod passport;
 mod requires;
 mod topology;
 

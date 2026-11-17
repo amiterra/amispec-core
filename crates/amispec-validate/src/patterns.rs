@@ -10,6 +10,27 @@ pub fn is_slug(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// `components[].passport` (GR-REF-001): catalog ref `<publisher>/<id>` or a
+/// private spec path `.amiterra/private-specs/<slug>.yaml`.
+pub fn is_passport_ref(s: &str) -> bool {
+    fn slug(x: &str) -> bool {
+        !x.is_empty()
+            && x.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && x.chars().last().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && x.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    }
+    if let Some(path) = s.strip_prefix(".amiterra/private-specs/") {
+        return match path.strip_suffix(".yaml") {
+            Some(name) => slug(name),
+            None => false,
+        };
+    }
+    match s.split_once('/') {
+        Some((a, b)) => slug(a) && slug(b),
+        None => false,
+    }
+}
+
 /// `imageDigest` / `chartDigest` — `^sha256:[a-f0-9]{64}$`
 pub fn is_sha256_digest(s: &str) -> bool {
     let Some(hex) = s.strip_prefix("sha256:") else {

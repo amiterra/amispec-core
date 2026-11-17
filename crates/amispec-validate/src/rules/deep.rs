@@ -480,6 +480,28 @@ pub fn check_cross_cluster_link(link: &Yaml, path: &str, out: &mut Vec<Finding>)
 /// Check topologies mode quorum fields on a topologyModes entry.
 pub fn check_topology_mode_extras(v: &Yaml, path: &str, out: &mut Vec<Finding>) {
     check_enum(v, "quorumType", path, QUORUM_TYPE, out, "quorum-type-enum");
+    // GR-MODE-002: quorum math is hard physics — odd vote count >= 3 for
+    // quorum-based profiles (2 data + 1 witness is the baseline).
+    let quorum = get(v, "quorumType").and_then(as_str).unwrap_or("none");
+    if matches!(quorum, "witness-assisted" | "raft-odd") {
+        let data = get(v, "replicas").and_then(as_i64).unwrap_or(1);
+        let witness = match get(v, "witnessComponent") {
+            Some(w) if get(w, "enabled").and_then(as_bool).unwrap_or(false) => {
+                get(w, "replicas").and_then(as_i64).unwrap_or(1)
+            }
+            _ => 0,
+        };
+        let votes = data + witness;
+        if votes < 3 || votes % 2 == 0 {
+            out.push(Finding::error(
+                format!("{path}.quorumType"),
+                "quorum-votes",
+                format!(
+                    "quorum profile `{quorum}` needs an odd vote count >= 3, got {votes}                      ({data} data + {witness} witness) (GR-MODE-002)"
+                ),
+            ));
+        }
+    }
     check_enum(
         v,
         "quorumArbiter",

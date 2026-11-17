@@ -125,7 +125,7 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
     app.kubernetes.io/instance: web
     app.kubernetes.io/name: web
@@ -144,13 +144,13 @@ spec:
       labels:
         amispec.io/cluster-id: local
         amispec.io/component-id: web
-        amispec.io/passport: stateless-app.1.0.0-rev1
+        amispec.io/passport: test-org.stateless-app.1.0.0-rev1
         amispec.io/stage: 05-applications
         app.kubernetes.io/instance: web
         app.kubernetes.io/name: web
     spec:
       containers:
-      - image: stateless-app:1.0.0
+      - image: docker.io/library/busybox:stable@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         name: app
         resources:
           limits:
@@ -170,7 +170,7 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
   name: web-pdb
   namespace: default
@@ -190,13 +190,13 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
   name: web-bindings
   namespace: default
 stringData:
   _amispec.component: web
-  _amispec.passport: stateless-app.1.0.0-rev1
+  _amispec.passport: test-org.stateless-app.1.0.0-rev1
 type: Opaque
 === clusters/local/05-applications/routes.yaml ===
 []
@@ -221,6 +221,9 @@ metadata:
   namespace: kube-system
 spec:
   egress:
+  - toEntities:
+    - cluster
+    - host
   - toEndpoints:
     - matchLabels:
         k8s:k8s-app: kube-dns

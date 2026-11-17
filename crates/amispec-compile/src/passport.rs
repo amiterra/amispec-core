@@ -42,6 +42,15 @@ pub struct PassportSummary {
     /// Inbound endpoint contracts (`interfaces.endpoints[]`): the `expose[]`
     /// port source (portless composition, ADR 0009).
     pub endpoints: Vec<PassportEndpoint>,
+    /// Data directory the workload expects its volume mounted at
+    /// (`hardwareAndKernel.storage.mountPath`).
+    pub data_mount_path: Option<String>,
+    /// Default container image (`workload.container.image`).
+    pub image: Option<String>,
+    /// Immutable pin (`workload.container.imageDigest`), GR-IMG-001.
+    pub image_digest: Option<String>,
+    /// Workload engine; kind selection is engine-driven (GR-OPR-002).
+    pub engine: String,
 }
 
 impl PassportSummary {
@@ -77,6 +86,13 @@ impl PassportSummary {
             .and_then(|v| v.as_str())
             .ok_or("passport: metadata.id is required")?
             .to_string();
+        let publisher = meta
+            .get("publisher")
+            .and_then(|v| v.as_str())
+            .ok_or("passport: metadata.publisher is required (GR-META-001)")?
+            .to_string();
+        // Canonical identity is the two-level ref `<publisher>/<id>`.
+        let id = format!("{publisher}/{id}");
         let version = meta
             .get("version")
             .and_then(|v| v.as_str())
@@ -89,13 +105,41 @@ impl PassportSummary {
         let archetype = meta.get("archetype").and_then(|v| v.as_str()).unwrap_or("");
         let stateful = matches!(archetype, "stateful-service" | "operator-cluster");
         let endpoints = parse_passport_endpoints(raw).map_err(|e| e.to_string())?;
+        let data_mount_path = doc
+            .get("hardwareAndKernel")
+            .and_then(|v| v.get("storage"))
+            .and_then(|v| v.get("mountPath"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let image = doc
+            .get("workload")
+            .and_then(|v| v.get("container"))
+            .and_then(|v| v.get("image"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let image_digest = doc
+            .get("workload")
+            .and_then(|v| v.get("container"))
+            .and_then(|v| v.get("imageDigest"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let engine = doc
+            .get("workload")
+            .and_then(|v| v.get("engine"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("k8s-deployment")
+            .to_string();
         Ok(Self {
             id,
             version,
             passport_rev,
+            engine,
             stateful,
             client_sidecars: Vec::new(),
             endpoints,
+            data_mount_path,
+            image,
+            image_digest,
         })
     }
 }
@@ -184,15 +228,19 @@ mod tests {
     #[test]
     fn sidecars_filtered_by_mode() {
         let p = PassportSummary {
-            id: "postgresql".into(),
+            id: "test-org/postgresql".into(),
             version: "18.0.0".into(),
             passport_rev: 6,
-            stateful: true,
+            engine: "k8s-statefulset".into(),
+        stateful: true,
             client_sidecars: vec![
                 sidecar("pgbouncer", vec!["degraded-ha", "strict-ha"]),
                 sidecar("always", vec![]),
             ],
             endpoints: Vec::new(),
+            data_mount_path: None,
+            image: None,
+            image_digest: None,
         };
         let got = p.client_sidecars_for_mode("standalone");
         assert_eq!(got.len(), 1, "only empty-mode (always) sidecar");
@@ -206,15 +254,19 @@ mod tests {
         let mut idx = PassportIndex::new();
         assert!(idx.is_empty());
         idx.insert(PassportSummary {
-            id: "stateless-app".into(),
+            id: "test-org/stateless-app".into(),
             version: "1.0.0".into(),
             passport_rev: 1,
-            stateful: false,
+            engine: "k8s-deployment".into(),
+        stateful: false,
             client_sidecars: vec![],
             endpoints: Vec::new(),
+            data_mount_path: None,
+            image: None,
+            image_digest: None,
         });
         assert_eq!(idx.len(), 1);
-        assert!(idx.get("stateless-app").is_some());
+        assert!(idx.get("test-org/stateless-app").is_some());
         assert!(idx.get("missing").is_none());
         let collected: PassportIndex = vec![].into_iter().collect();
         assert!(collected.is_empty());
@@ -225,7 +277,13 @@ mod tests {
         let raw = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: demo-web, name: Web, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+metadata: { id: demo-web, publisher: test-org, title: Web, description: Test fixture, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+workload:
+  engine: k8s-deployment
+  priorityClass: stateless-web
+  container:
+    image: docker.io/library/busybox:stable
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 interfaces:
   egressDefaultMode: graph-only
   endpoints:
@@ -235,7 +293,7 @@ interfaces:
   requires: {}
 "#;
         let p = PassportSummary::from_passport_yaml(raw).unwrap();
-        assert_eq!(p.id, "demo-web");
+        assert_eq!(p.id, "test-org/demo-web");
         assert_eq!(p.version, "1.0.0");
         assert!(!p.stateful);
         assert_eq!(p.endpoint_port("web"), Some(8080));

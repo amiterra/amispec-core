@@ -35,6 +35,11 @@ pub use patterns::*;
 pub use report::{Finding, Report, Severity};
 pub use rules::{Options, validate_topology_str};
 
+/// GR-META-005: platform-reserved slug check (shared with catalog tooling).
+pub fn is_reserved_slug(s: &str) -> bool {
+    rules::passport::is_reserved_slug(s)
+}
+
 pub use amispec_schema::PassportSlots;
 
 use report::Finding as F;
@@ -197,7 +202,7 @@ mod tests {
         let yaml = r#"
 apiVersion: catalog.amispec.io/v9
 kind: ComponentPassport
-metadata: { id: a, name: b, version: "1", passportRev: 1, category: application, archetype: stateless-app }
+metadata: { publisher: test-org, id: a, title: b, description: Test fixture, version: "1.0", passportRev: 1, category: application, archetype: stateless-app }
 "#;
         let r = validate_str("t", yaml, &opts());
         assert!(r.errors().any(|e| e.rule == "api-version"));
@@ -241,7 +246,7 @@ topologyModes:
     scaleDownPolicy: immediate
     disruptionBudget: { maxUnavailable: 1, updateStrategy: rolling }
     podAntiAffinity: soft
-workload: { engine: k8s-deployment, priorityClass: background-batch }
+workload: { engine: k8s-deployment, priorityClass: background-batch, container: { image: 'docker.io/library/busybox:stable', imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }
 interfaces: { egressDefaultMode: graph-only, endpoints: [], provides: [], requires: {} }
 "#;
 
@@ -296,7 +301,7 @@ topologyModes:
     scaleDownPolicy: immediate
     disruptionBudget: { maxUnavailable: 1, updateStrategy: rolling }
     podAntiAffinity: soft
-workload: { engine: k8s-deployment, priorityClass: background-batch }
+workload: { engine: k8s-deployment, priorityClass: background-batch, container: { image: 'docker.io/library/busybox:stable', imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }
 interfaces: { egressDefaultMode: graph-only, endpoints: [], provides: [], requires: {} }
 hardwareAndKernel:
   resources: { minCpuCores: 0.1, minMemoryMb: 64, recommendedMemoryMb: 128 }
@@ -379,7 +384,7 @@ operations:
         let yaml = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: p, organization: o }
+metadata: { publisher: test-org, projectId: p, organization: o }
 clusters:
   - id: c1
     name: n
@@ -436,7 +441,7 @@ topologyModes:
     scaleDownPolicy: immediate
     disruptionBudget: { maxUnavailable: 1, updateStrategy: rolling }
     podAntiAffinity: soft
-workload: { engine: k8s-deployment, priorityClass: background-batch }
+workload: { engine: k8s-deployment, priorityClass: background-batch, container: { image: 'docker.io/library/busybox:stable', imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }
 interfaces: { egressDefaultMode: graph-only, endpoints: [], provides: [], requires: {} }
 hardwareAndKernel:
   resources: { minCpuCores: 0.1, minMemoryMb: 64, recommendedMemoryMb: 128 }
@@ -466,11 +471,11 @@ operations:
     #[test]
     fn rejects_liveness_not_local_only() {
         let yaml = format!(
-            "{PASSPORT_PREFIX}hardwareAndKernel:\n  resources:\n    minCpuCores: 0.1\n    minMemoryMb: 64\n    recommendedMemoryMb: 128\nworkload:\n  engine: k8s-deployment\n  priorityClass: background-batch\n  probes:\n    liveness:\n      type: http\n      path: /health\n      port: 8080\n      localProcessOnly: false\n{PASSPORT_SUFFIX}"
+            "{PASSPORT_PREFIX}hardwareAndKernel:\n  resources:\n    minCpuCores: 0.1\n    minMemoryMb: 64\n    recommendedMemoryMb: 128\nworkload:\n  engine: k8s-deployment\n  priorityClass: background-batch\n  container:\n    image: docker.io/library/busybox:stable\n    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n  probes:\n    liveness:\n      type: http\n      path: /health\n      port: 8080\n      localProcessOnly: false\n{PASSPORT_SUFFIX}"
         );
         // workload appears twice — rebuild prefix without workload
         let yaml = yaml.replace(
-            "workload: { engine: k8s-deployment, priorityClass: background-batch }\ninterfaces",
+            "workload: { engine: k8s-deployment, priorityClass: background-batch, container: { image: 'docker.io/library/busybox:stable', imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }\ninterfaces",
             "interfaces",
         );
         assert_rule(&yaml, "liveness-local-only");

@@ -526,7 +526,7 @@ clusters:
       - { id: l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -545,7 +545,7 @@ clusters:
       - { id: l4, layer: l4-balancer, provider: cilium-l4-bgp }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -564,7 +564,7 @@ clusters:
       - { id: edge, layer: edge-proxy, provider: cloudflare }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -583,7 +583,7 @@ clusters:
       - { id: l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -591,7 +591,7 @@ clusters:
         expose:
           - { endpoint: web, viaBalancer: l7, scope: public, hostname: app.example.io, pathPrefix: /api }
       - id: api
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -610,7 +610,7 @@ clusters:
       - { id: l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -632,7 +632,7 @@ clusters:
         tls: none
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -669,7 +669,7 @@ clusters:
         tls: letsencrypt-http01
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -695,7 +695,7 @@ clusters:
         tls: letsencrypt-http01
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -707,7 +707,7 @@ clusters:
             subdomain: admin
             securityPolicy: { clientAuth: oidc }
       - id: keycloak
-        passport: keycloak
+        passport: test-org/keycloak
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -763,7 +763,7 @@ clusters:
       - { id: l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -786,7 +786,7 @@ clusters:
       - { id: l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }

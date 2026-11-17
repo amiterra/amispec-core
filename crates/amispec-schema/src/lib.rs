@@ -288,6 +288,9 @@ pub struct Disc {
 pub struct WorkloadOverride {
     #[serde(default)]
     pub image: Option<String>,
+    /// GR-IMG-001: overrides carry the same image+digest pair.
+    #[serde(default, rename = "imageDigest")]
+    pub image_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -315,6 +318,21 @@ pub struct ComponentInstance {
     pub expose: Vec<Expose>,
     #[serde(default, rename = "workloadOverride")]
     pub workload_override: Option<WorkloadOverride>,
+    /// Data volume declaration (`storage` in the topology schema).
+    #[serde(default)]
+    pub storage: Option<VolumeOverride>,
+}
+
+/// Topology storage declaration (`storage` in CUE `#VolumeTopologyOverride`):
+/// size and media tier of the component's data volume.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct VolumeOverride {
+    #[serde(rename = "sizeGb")]
+    pub size_gb: u32,
+    #[serde(default, rename = "committedSizeGb")]
+    pub committed_size_gb: Option<u32>,
+    #[serde(rename = "mediaTier")]
+    pub media_tier: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -514,6 +532,8 @@ struct PassportProvideView {
 #[derive(Debug, Clone, Deserialize)]
 struct PassportRequireView {
     capability: String,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -542,6 +562,204 @@ pub struct PassportSlots {
     pub provides: BTreeMap<String, String>,
     /// Incoming requirements: slot name → capability.
     pub requires: BTreeMap<String, String>,
+    /// Effective software version — explicit `metadata.version` or the
+    /// version core of a version-ful image tag (GR-VER-001).
+    pub version: Option<String>,
+    /// Provider-side access declaration per provides slot (GR-CRED-002).
+    pub provides_access: BTreeMap<String, AccessDecl>,
+    /// Explicit `provides[].version` per slot (defaults to `version`).
+    pub provides_versions: BTreeMap<String, String>,
+    /// `requires[].version` range expressions per slot (GR-VER-003).
+    pub requires_versions: BTreeMap<String, String>,
+    /// Consumer-side credential processes flattened to `uses` entries
+    /// (GR-CRED-001): (required slot, verbs, resources, plugins).
+    pub process_uses: Vec<ProcessUse>,
+}
+
+/// `provides[].access` — what the provider can enforce (GR-CRED-002).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccessDecl {
+    pub fulfillment: Vec<String>,
+    pub plugins: Vec<String>,
+}
+
+/// One `processes[].uses[]` entry of a consumer passport (GR-CRED-001).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessUse {
+    pub slot: String,
+    pub verbs: Vec<String>,
+    pub resources: Vec<String>,
+    pub plugins: Vec<String>,
+}
+
+
+/// Parsed version: numeric core segments + optional suffix (GR-VER-002).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedVersion {
+    pub core: Vec<u64>,
+    pub suffix: Option<String>,
+}
+
+/// `metadata.version`-shaped version: 2-4 numeric segments + optional suffix.
+pub fn parse_version(s: &str) -> Option<ParsedVersion> {
+    let (core_str, suffix) = match s.split_once('-') {
+        Some((c, rest)) => (c, Some(rest.to_string())),
+        None => (s, None),
+    };
+    let segs: Vec<u64> = core_str
+        .split('.')
+        .map(|x| {
+            if x.is_empty() || !x.bytes().all(|b| b.is_ascii_digit()) {
+                None
+            } else {
+                x.parse::<u64>().ok()
+            }
+        })
+        .collect::<Option<Vec<u64>>>()?;
+    if !(2..=4).contains(&segs.len()) {
+        return None;
+    }
+    if let Some(sx) = &suffix {
+        if sx.is_empty()
+            || !sx
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return None;
+        }
+    }
+    Some(ParsedVersion {
+        core: segs,
+        suffix,
+    })
+}
+
+/// Version ordering with zero-padded cores; a prerelease suffix sorts BEFORE
+/// the plain release of the same core (semver rule, GR-VER-002).
+pub fn cmp_versions(a: &ParsedVersion, b: &ParsedVersion) -> std::cmp::Ordering {
+    let n = a.core.len().max(b.core.len());
+    for i in 0..n {
+        let x = a.core.get(i).copied().unwrap_or(0);
+        let y = b.core.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    match (&a.suffix, &b.suffix) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(x), Some(y)) => x.cmp(y),
+    }
+}
+
+/// Range clause: comparator + version (GR-VER-003).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeClause {
+    pub op: RangeOp,
+    pub version: ParsedVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeOp {
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+/// Parse a GR-VER-003 range: comparators AND-ed by spaces, `*`/empty = any.
+/// `None` = invalid syntax (distinct from "any", which is `Some(vec![])`).
+pub fn parse_version_range(s: &str) -> Option<Vec<RangeClause>> {
+    let t = s.trim();
+    if t.is_empty() || t == "*" {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    for tok in t.split_whitespace() {
+        let (op, ver) = if let Some(rest) = tok.strip_prefix(">=") {
+            (RangeOp::Ge, rest)
+        } else if let Some(rest) = tok.strip_prefix("<=") {
+            (RangeOp::Le, rest)
+        } else if let Some(rest) = tok.strip_prefix("!=") {
+            (RangeOp::Ne, rest)
+        } else if let Some(rest) = tok.strip_prefix('>') {
+            (RangeOp::Gt, rest)
+        } else if let Some(rest) = tok.strip_prefix('<') {
+            (RangeOp::Lt, rest)
+        } else if let Some(rest) = tok.strip_prefix('=') {
+            (RangeOp::Eq, rest)
+        } else {
+            (RangeOp::Eq, tok)
+        };
+        let version = parse_version(ver.strip_prefix('v').unwrap_or(ver))?;
+        out.push(RangeClause { op, version });
+    }
+    Some(out)
+}
+
+/// `true` when `version` satisfies every clause of `range` (AND semantics).
+pub fn version_in_range(version: &str, clauses: &[RangeClause]) -> Option<bool> {
+    let v = parse_version(version)?;
+    Some(clauses.iter().all(|c| {
+        let ord = cmp_versions(&v, &c.version);
+        match c.op {
+            RangeOp::Eq => ord.is_eq(),
+            RangeOp::Ne => ord.is_ne(),
+            RangeOp::Gt => ord.is_gt(),
+            RangeOp::Ge => ord.is_ge(),
+            RangeOp::Lt => ord.is_lt(),
+            RangeOp::Le => ord.is_le(),
+        }
+    }))
+}
+
+/// Nested lookup helper for serde_yaml values (no JSON-pointer support there).
+fn vget<'a>(v: &'a serde_yaml::Value, path: &[&str]) -> Option<&'a serde_yaml::Value> {
+    let mut cur = v;
+    for k in path {
+        cur = cur.get(*k)?;
+    }
+    Some(cur)
+}
+
+/// Leading version core `v?N(.N){1,3}` of a tag/version string (GR-VER-002).
+pub fn tag_version_core(s: &str) -> Option<String> {
+    let t = s.strip_prefix('v').unwrap_or(s);
+    let b = t.as_bytes();
+    let (mut i, mut segs, mut end) = (0usize, 0usize, 0usize);
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == start {
+            break;
+        }
+        segs += 1;
+        end = i;
+        if segs < 4 && i + 1 < b.len() && b[i] == b'.' && b[i + 1].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    if (2..=4).contains(&segs) {
+        Some(t[..end].to_string())
+    } else {
+        None
+    }
+}
+
+/// Image tag from an `image` ref (after the last `:` of the last path segment).
+pub fn image_tag(image: &str) -> Option<&str> {
+    let last = image.rsplit('/').next()?;
+    match last.rsplit_once(':') {
+        Some((_, tag)) if !tag.is_empty() => Some(tag),
+        _ => None,
+    }
 }
 
 /// Extract the slot contract (`interfaces.provides` / `interfaces.requires`)
@@ -557,6 +775,16 @@ pub fn parse_passport_slots(raw: &str) -> Result<PassportSlots, SchemaError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| SchemaError::Parse("passport: metadata.id is required".into()))?
         .to_string();
+    // Canonical key is the two-level ref `<publisher>/<id>` (GR-META-001);
+    // publisher-less docs key on the bare id (transitional).
+    let id = match doc
+        .get("metadata")
+        .and_then(|m| m.get("publisher"))
+        .and_then(|v| v.as_str())
+    {
+        Some(p) if !p.is_empty() => format!("{p}/{id}"),
+        _ => id,
+    };
     let mut slots = PassportSlots {
         id,
         ..Default::default()
@@ -566,7 +794,78 @@ pub fn parse_passport_slots(raw: &str) -> Result<PassportSlots, SchemaError> {
             slots.provides.insert(p.slot, p.capability);
         }
         for (slot, r) in ifaces.requires {
+            if let Some(range) = r.version {
+                slots.requires_versions.insert(slot.clone(), range);
+            }
             slots.requires.insert(slot, r.capability);
+        }
+    }
+    // Effective version (GR-VER-001): explicit or derived from a version-ful tag.
+    slots.version = vget(&doc, &["metadata", "version"])
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            vget(&doc, &["workload", "container", "image"])
+                .and_then(|v| v.as_str())
+                .and_then(image_tag)
+                .and_then(tag_version_core)
+        });
+    // Provider access declaration per provides slot (GR-CRED-002).
+    if let Some(provides) = vget(&doc, &["interfaces", "provides"]).and_then(|v| v.as_sequence()) {
+        for p in provides {
+            let Some(slot) = p.get("slot").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let mut decl = AccessDecl::default();
+            if let Some(access) = p.get("access") {
+                if let Some(vs) = access.get("fulfillment").and_then(|v| v.as_sequence()) {
+                    decl.fulfillment =
+                        vs.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                }
+                if let Some(ps) = access.get("plugins").and_then(|v| v.as_sequence()) {
+                    decl.plugins =
+                        ps.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                }
+            }
+            if let Some(v) = p.get("version").and_then(|v| v.as_str()) {
+                slots.provides_versions.insert(slot.to_string(), v.to_string());
+            }
+            slots.provides_access.insert(slot.to_string(), decl);
+        }
+    }
+    // Consumer credential processes flattened to uses (GR-CRED-001).
+    if let Some(procs) = doc.get("processes").and_then(|v| v.as_mapping()) {
+        for (_, proc) in procs {
+            let Some(uses) = proc.get("uses").and_then(|v| v.as_sequence()) else {
+                continue;
+            };
+            for u in uses {
+                let Some(slot) = u.get("slot").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let mut verbs = Vec::new();
+                let mut resources = Vec::new();
+                let mut plugins = Vec::new();
+                if let Some(gs) = u.get("grants").and_then(|v| v.as_sequence()) {
+                    for g in gs {
+                        if let Some(vs) = g.get("verbs").and_then(|v| v.as_sequence()) {
+                            verbs.extend(vs.iter().filter_map(|v| v.as_str().map(String::from)));
+                        }
+                        if let Some(rs) = g.get("resources").and_then(|v| v.as_sequence()) {
+                            resources.extend(rs.iter().filter_map(|v| v.as_str().map(String::from)));
+                        }
+                    }
+                }
+                if let Some(ps) = u.get("plugins").and_then(|v| v.as_sequence()) {
+                    plugins.extend(ps.iter().filter_map(|v| v.as_str().map(String::from)));
+                }
+                slots.process_uses.push(ProcessUse {
+                    slot: slot.to_string(),
+                    verbs,
+                    resources,
+                    plugins,
+                });
+            }
         }
     }
     Ok(slots)
@@ -722,7 +1021,7 @@ mod tests {
     const SLOTS_DOC: &str = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: youtrack, name: YouTrack, version: "1.0.0", passportRev: 3 }
+metadata: { publisher: test-org, id: youtrack, title: YouTrack, description: Test fixture, version: "1.0.0", passportRev: 3 }
 interfaces:
   egressDefaultMode: graph-only
   endpoints: []
@@ -735,7 +1034,7 @@ interfaces:
     const BALANCER_DOC: &str = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: balancer-cilium-l7, name: Balancer, version: "1.0.0", passportRev: 1 }
+metadata: { publisher: test-org, id: balancer-cilium-l7, title: Balancer, description: Test fixture, version: "1.0.0", passportRev: 1 }
 interfaces:
   egressDefaultMode: graph-only
   endpoints: []
@@ -747,7 +1046,7 @@ interfaces:
     const PG_DOC: &str = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: postgresql, name: PG, version: "18.0.0", passportRev: 6 }
+metadata: { publisher: test-org, id: postgresql, title: PG, description: Test fixture, version: "18.0.0", passportRev: 6 }
 interfaces:
   egressDefaultMode: graph-only
   endpoints: []
@@ -759,7 +1058,7 @@ interfaces:
     #[test]
     fn parses_slot_contract() {
         let slots = parse_passport_slots(SLOTS_DOC).unwrap();
-        assert_eq!(slots.id, "youtrack");
+        assert_eq!(slots.id, "test-org/youtrack");
         assert!(slots.provides.is_empty());
         assert_eq!(
             slots.requires.get("edge").map(|s| s.as_str()),
@@ -783,17 +1082,17 @@ interfaces:
 
     #[test]
     fn closure_pulls_transitive_requirements() {
-        let res = dependency_closure(&catalog(), &[String::from("youtrack")]);
+        let res = dependency_closure(&catalog(), &[String::from("test-org/youtrack")]);
         assert_eq!(
             res.resolved,
-            ["youtrack", "balancer-cilium-l7", "postgresql"]
+            ["test-org/youtrack", "test-org/balancer-cilium-l7", "test-org/postgresql"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<BTreeSet<_>>()
         );
         assert_eq!(
             res.providers.get("http-l7-gateway").map(|s| s.as_str()),
-            Some("balancer-cilium-l7")
+            Some("test-org/balancer-cilium-l7")
         );
         assert!(res.unresolved.is_empty());
     }
@@ -801,12 +1100,12 @@ interfaces:
     #[test]
     fn closure_reports_unresolvable_capabilities() {
         let mut cat = catalog();
-        cat.remove("postgresql");
-        let res = dependency_closure(&cat, &[String::from("youtrack")]);
+        cat.remove("test-org/postgresql");
+        let res = dependency_closure(&cat, &[String::from("test-org/youtrack")]);
         assert_eq!(res.unresolved.len(), 1);
         assert_eq!(
             res.unresolved[0],
-            ("youtrack".into(), "database".into(), "postgres-sql".into())
+            ("test-org/youtrack".into(), "database".into(), "postgres-sql".into())
         );
     }
 
@@ -814,19 +1113,52 @@ interfaces:
     fn closure_choice_is_deterministic_with_alternatives() {
         let mut cat = catalog();
         let extra = BALANCER_DOC.replace("balancer-cilium-l7", "aaa-first");
-        cat.insert("aaa-first".into(), parse_passport_slots(&extra).unwrap());
-        let res = dependency_closure(&cat, &[String::from("youtrack")]);
+        cat.insert("test-org/aaa-first".into(), parse_passport_slots(&extra).unwrap());
+        let res = dependency_closure(&cat, &[String::from("test-org/youtrack")]);
         assert_eq!(
             res.providers.get("http-l7-gateway").map(|s| s.as_str()),
-            Some("aaa-first"),
+            Some("test-org/aaa-first"),
             "lexicographically smallest provider wins"
         );
         assert_eq!(
             res.alternatives.get("http-l7-gateway"),
             Some(&vec![
-                "aaa-first".to_string(),
-                "balancer-cilium-l7".to_string()
+                "test-org/aaa-first".to_string(),
+                "test-org/balancer-cilium-l7".to_string()
             ])
         );
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn version_parse_and_compare() {
+        let a = parse_version("17.11").unwrap();
+        let b = parse_version("17.11.0").unwrap();
+        assert_eq!(cmp_versions(&a, &b), std::cmp::Ordering::Equal); // zero-pad
+        let rc = parse_version("1.2.3-rc.1").unwrap();
+        let rel = parse_version("1.2.3").unwrap();
+        assert_eq!(cmp_versions(&rc, &rel), std::cmp::Ordering::Less); // prerelease first
+        assert!(parse_version("1").is_none()); // 2..4 segments only
+    }
+
+    #[test]
+    fn version_ranges() {
+        let clauses = parse_version_range(">=16.0 <18.0").unwrap();
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(version_in_range("17.11", &clauses), Some(true));
+        assert_eq!(version_in_range("18.0.0", &clauses), Some(false));
+        assert_eq!(version_in_range("16.0", &clauses), Some(true));
+        assert_eq!(version_in_range("15.9", &clauses), Some(false));
+        let any = parse_version_range("*").unwrap();
+        assert!(any.is_empty());
+        assert_eq!(version_in_range("24.3.1.2672", &any), Some(true));
+        let ne = parse_version_range("!=1.0.0").unwrap();
+        assert_eq!(version_in_range("1.0.0", &ne), Some(false));
+        assert_eq!(version_in_range("1.0.1", &ne), Some(true));
+        assert!(parse_version_range(">=bogus").is_none());
     }
 }

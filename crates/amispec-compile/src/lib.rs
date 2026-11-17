@@ -43,6 +43,12 @@ pub use provenance::*;
 
 pub use amispec_schema::PassportEndpoint;
 
+/// Default StorageClass for stateful data volumes (platform contract
+/// `storage-class-local`, Design Doc 0027): the SC `ami init` creates on the
+/// host data root. Overridable per topology later; a single name keeps the
+/// declared = enforced story simple for now.
+pub const DEFAULT_STORAGE_CLASS: &str = "amiterra-local";
+
 /// Version stamped into deployment bundles (preview↔apply skew detection).
 /// Bumped together with incompatible changes to the compiled tree contract.
 pub fn bundle_version() -> String {
@@ -194,6 +200,18 @@ pub fn compile(
             let passport = passports.get(&comp.passport);
             let pin = passport_pin(&comp.passport, &comp.version, comp.passport_rev);
 
+            // GR-IMG-001 / GR-VER-004: every component resolves to a real
+            // image (override or passport) — the legacy `<id>:<version>`
+            // fallback is forbidden.
+            let resolved_image = comp
+                .workload_override
+                .as_ref()
+                .and_then(|w| w.image.clone())
+                .or_else(|| passport.and_then(|p| p.image.clone()));
+            let Some(resolved_image) = resolved_image else {
+                return Err(CompileError::MissingImage(comp.id.clone()));
+            };
+
             // user-spec-delta (lossless decompile of user values)
             let delta = user_spec_delta(comp);
 
@@ -232,6 +250,8 @@ pub fn compile(
                 .unwrap_or_default();
             let sidecar_names: Vec<String> = sidecars.iter().map(|s| s.name.clone()).collect();
 
+            // GR-OPR-002: StatefulSet iff engine says so.
+            let stateful = passport.map(|p| p.engine == "k8s-statefulset").unwrap_or(false);
             let workload = workload_object(
                 &cluster.id,
                 comp,
@@ -241,9 +261,15 @@ pub fn compile(
                 &sidecar_names,
                 opts.provenance,
                 cluster.maintenance_window.as_deref(),
+                passports
+                    .get(&comp.passport)
+                    .and_then(|s| s.data_mount_path.as_deref()),
+                &resolved_image,
+                passports
+                    .get(&comp.passport)
+                    .and_then(|s| s.image_digest.as_deref()),
+                stateful,
             );
-
-            let stateful = is_stateful(comp, passport);
             if stateful {
                 stateful_docs.push(workload);
             } else {
@@ -520,13 +546,14 @@ fn workload_object(
     sidecar_names: &[String],
     provenance: bool,
     maintenance_window: Option<&str>,
+    data_mount_path: Option<&str>,
+    passport_image: &str,
+    passport_digest: Option<&str>,
+    stateful: bool,
 ) -> Value {
     let ns = comp.zone.clone().unwrap_or_else(|| "default".into());
-    let kind = if is_stateful_name(&comp.passport) {
-        "StatefulSet"
-    } else {
-        "Deployment"
-    };
+    // GR-OPR-002: workload kind is engine-driven, never name-heuristic.
+    let kind = if stateful { "StatefulSet" } else { "Deployment" };
 
     let mut labels = Map::new();
     labels.insert("app.kubernetes.io/name".into(), json!(comp.id));
@@ -649,26 +676,67 @@ fn workload_object(
     let max_endpoint_or_stmt = 60u32;
     let tps = graceful_stop.max(pre_stop.saturating_add(max_endpoint_or_stmt));
     pod_spec.insert("terminationGracePeriodSeconds".into(), json!(tps));
-    pod_spec.insert(
-        "containers".into(),
-        json!([{
-            "name": "app",
-            "image": comp
-                .workload_override
-                .as_ref()
-                .and_then(|w| w.image.clone())
-                .unwrap_or_else(|| format!("{}:{}", comp.passport, comp.version)),
-            "resources": {
-                "requests": {
-                    "cpu": comp.resources.cpu_cores.to_string(),
-                    "memory": format!("{}Mi", comp.resources.memory_mb)
-                },
-                "limits": {
-                    "memory": format!("{}Mi", comp.resources.memory_mb)
-                }
+    // GR-IMG-001: manifests pin `image@sha256:...` (override > passport).
+    let image_base = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.image.clone())
+        .unwrap_or_else(|| passport_image.to_string());
+    let image_digest = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.image_digest.clone())
+        .or_else(|| passport_digest.map(String::from));
+    let image_ref = match image_digest {
+        Some(d) => format!("{image_base}@{d}"),
+        None => image_base,
+    };
+    let mut container = json!({
+        "name": "app",
+        "image": image_ref,
+        "resources": {
+            "requests": {
+                "cpu": comp.resources.cpu_cores.to_string(),
+                "memory": format!("{}Mi", comp.resources.memory_mb)
+            },
+            "limits": {
+                "memory": format!("{}Mi", comp.resources.memory_mb)
             }
-        }]),
-    );
+        }
+    });
+    // Data volume (topology `storage`): the workload mounts the claim at the
+    // passport's declared data directory (A1.3 / R4 — persistence contract).
+    if comp.storage.is_some() {
+        let mount = data_mount_path.unwrap_or("/data");
+        container.as_object_mut().unwrap().insert(
+            "volumeMounts".into(),
+            json!([{ "name": "data", "mountPath": mount }]),
+        );
+    }
+    // Non-secret configuration from the topology `config` map becomes container
+    // env (declared = enforced). Secrets stay in the SOPS world (ADR 0009) and
+    // arrive via A6.1 autoprovisioning — never as plaintext config values.
+    if let Some(cfg) = &comp.config
+        && !cfg.is_empty()
+    {
+        let env: Vec<Value> = cfg
+            .iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+                json!({ "name": k, "value": val })
+            })
+            .collect();
+        container
+            .as_object_mut()
+            .unwrap()
+            .insert("env".into(), Value::Array(env));
+    }
+    pod_spec.insert("containers".into(), json!([container]));
     pod_spec.insert(
         "securityContext".into(),
         json!({
@@ -681,6 +749,22 @@ fn workload_object(
     let mut spec = Map::new();
     if kind == "StatefulSet" {
         spec.insert("serviceName".into(), json!(comp.id.clone()));
+        if let Some(st) = &comp.storage {
+            // StatefulSet identity volume: one claim per replica ("data").
+            spec.insert(
+                "volumeClaimTemplates".into(),
+                json!([{
+                    "metadata": { "name": "data" },
+                    "spec": {
+                        "accessModes": ["ReadWriteOnce"],
+                        "storageClassName": DEFAULT_STORAGE_CLASS,
+                        "resources": {
+                            "requests": { "storage": format!("{}Gi", st.size_gb) }
+                        }
+                    }
+                }]),
+            );
+        }
     }
     spec.insert(
         "replicas".into(),
@@ -711,26 +795,6 @@ fn workload_object(
     })
 }
 
-fn is_stateful(
-    comp: &amispec_schema::ComponentInstance,
-    passport: Option<&PassportSummary>,
-) -> bool {
-    if let Some(p) = passport {
-        return p.stateful;
-    }
-    is_stateful_name(&comp.passport)
-}
-
-fn is_stateful_name(passport: &str) -> bool {
-    let p = passport.to_ascii_lowercase();
-    p.contains("postgres")
-        || p.contains("clickhouse")
-        || p.contains("valkey")
-        || p.contains("redis")
-        || p.contains("mysql")
-        || p.contains("stateful")
-        || p.contains("sql")
-}
 
 fn pod_disruption_budget(
     cluster_id: &str,
@@ -997,12 +1061,20 @@ fn network_policies(
         },
         "spec": {
             "endpointSelector": {},
-            "egress": [{
-                "toEndpoints": [{
-                    "matchLabels": { "k8s:k8s-app": "kube-dns" }
-                }],
-                "toPorts": [{ "ports": [{ "port": "53", "protocol": "ANY" }] }]
-            }]
+            "egress": [
+                {
+                    // kube-system components must keep talking to the API
+                    // server and node services (metrics-server, provisioners):
+                    // a DNS-only egress lockdown broke them (found by A1.3).
+                    "toEntities": ["cluster", "host"]
+                },
+                {
+                    "toEndpoints": [{
+                        "matchLabels": { "k8s:k8s-app": "kube-dns" }
+                    }],
+                    "toPorts": [{ "ports": [{ "port": "53", "protocol": "ANY" }] }]
+                }
+            ]
         }
     })];
     for c in comps {
@@ -1165,6 +1237,10 @@ fn write_files(out_dir: &Path, files: &[GeneratedFile]) -> Result<(), CompileErr
 pub enum CompileError {
     #[error("topology has no clusters")]
     EmptyClusters,
+    #[error(
+        "component `{0}` has no image: provide workload.container.image + imageDigest          or workloadOverride.image (GR-IMG-001; the `<id>:<version>` fallback is banned, GR-VER-004)"
+    )]
+    MissingImage(String),
     #[error("io error: {0}")]
     Io(String),
     #[error(
@@ -1221,7 +1297,7 @@ mod tests {
         let yaml = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: demo, organization: ex }
+metadata: { publisher: test-org, projectId: demo, organization: ex }
 clusters:
   - id: local
     name: Local
@@ -1236,7 +1312,7 @@ clusters:
       - { id: l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         zone: dmz
@@ -1247,7 +1323,7 @@ clusters:
         bindings:
           - { to: db, asRequirement: database }
       - id: db
-        passport: postgresql
+        passport: test-org/postgresql
         version: "18.0.0"
         passportRev: 6
         topology: { mode: standalone, replicas: 1 }
@@ -1258,21 +1334,107 @@ clusters:
         parse_topology(yaml).unwrap()
     }
 
-    /// Passport contracts for the mini topology (expose port resolution).
-    fn mini_passports() -> PassportIndex {
-        let raw = r#"
+    #[test]
+    fn stateful_storage_renders_volume_claim_and_mount() {
+        // A1.3/R4: a topology `storage` declaration becomes a real PVC +
+        // mount at the passport's data directory (contract: amiterra-local).
+        let mut idx = PassportIndex::new();
+        idx.insert(PassportSummary::from_passport_yaml(mini_passports_raw()).unwrap());
+        idx.insert(
+            PassportSummary::from_passport_yaml(
+                r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: stateless-app, name: App, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+metadata: { id: postgresql, publisher: test-org, title: PG, description: Test fixture, version: "18.0.0", passportRev: 6, category: database, archetype: stateful-service }
+workload:
+  engine: k8s-statefulset
+  priorityClass: stateless-web
+  container:
+    image: docker.io/library/busybox:stable
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints:
+    - { name: sql, protocol: tcp, containerPort: 5432, role: datastore, defaultScope: cluster-private }
+  provides: []
+  requires: {}
+hardwareAndKernel:
+  resources: { minCpuCores: 0.5, minMemoryMb: 512 }
+  storage: { mountPath: /var/lib/postgresql/data, minSizeGb: 10 }
+"#,
+            )
+            .unwrap(),
+        );
+        let out = compile(&mini_topology(), &idx, &Options::dry()).unwrap();
+        let render: String = out
+            .files
+            .iter()
+            .map(|f| f.contents.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(render.contains("volumeClaimTemplates"), "claim rendered");
+        assert!(
+            render.contains("storageClassName: amiterra-local"),
+            "contract SC"
+        );
+        assert!(
+            render.contains("storage: 20Gi"),
+            "size from topology storage"
+        );
+        assert!(
+            render.contains("mountPath: /var/lib/postgresql/data"),
+            "mount from passport storage.mountPath"
+        );
+        assert!(render.contains("kind: StatefulSet"), "stateful workload");
+    }
+
+    /// Passport contracts for the mini topology (expose port resolution).
+    fn mini_passports_raw() -> &'static str {
+        r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { id: stateless-app, publisher: test-org, title: App, description: Test fixture, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+workload:
+  engine: k8s-deployment
+  priorityClass: stateless-web
+  container:
+    image: docker.io/library/busybox:stable
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 interfaces:
   egressDefaultMode: graph-only
   endpoints:
     - { name: web, protocol: http, containerPort: 8080, role: ui, defaultScope: public }
   provides: []
   requires: {}
-"#;
+"#
+    }
+
+    fn mini_passports() -> PassportIndex {
         let mut idx = PassportIndex::new();
-        idx.insert(PassportSummary::from_passport_yaml(raw).unwrap());
+        idx.insert(PassportSummary::from_passport_yaml(mini_passports_raw()).unwrap());
+        idx.insert(
+            PassportSummary::from_passport_yaml(
+                r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { id: postgresql, publisher: test-org, title: PG, description: Test fixture, version: "18.0.0", passportRev: 6, category: database, archetype: stateful-service }
+workload:
+  engine: k8s-statefulset
+  priorityClass: stateless-web
+  container:
+    image: 'docker.io/library/busybox:stable'
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints:
+    - { name: sql, protocol: tcp, containerPort: 5432, role: datastore, defaultScope: cluster-private }
+  provides:
+    - { slot: sql-cluster, capability: postgres-sql, dialect: postgresql, version: "18.0.0" }
+  requires: {}
+"#,
+            )
+            .unwrap(),
+        );
         idx
     }
 
@@ -1346,7 +1508,7 @@ interfaces:
         let yaml = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: demo, organization: ex }
+metadata: { publisher: test-org, projectId: demo, organization: ex }
 clusters:
   - id: local
     name: Local
@@ -1361,7 +1523,7 @@ clusters:
       - { id: l7, layer: l7-gateway, provider: cilium-envoy }
     components:
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -1369,7 +1531,7 @@ clusters:
     bindings: []
 "#;
         let topo = parse_topology(yaml).unwrap();
-        let out = compile(&topo, &PassportIndex::default(), &Options::dry()).unwrap();
+        let out = compile(&topo, &mini_passports(), &Options::dry()).unwrap();
         for f in &out.files {
             for kind in [
                 "GatewayClass",

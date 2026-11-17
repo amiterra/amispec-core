@@ -829,7 +829,7 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
     amispec.io/zone: dmz-public
     app.kubernetes.io/instance: web
@@ -849,14 +849,14 @@ spec:
       labels:
         amispec.io/cluster-id: local
         amispec.io/component-id: web
-        amispec.io/passport: stateless-app.1.0.0-rev1
+        amispec.io/passport: test-org.stateless-app.1.0.0-rev1
         amispec.io/stage: 05-applications
         amispec.io/zone: dmz-public
         app.kubernetes.io/instance: web
         app.kubernetes.io/name: web
     spec:
       containers:
-      - image: stateless-app:1.0.0
+      - image: docker.io/library/busybox:stable@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         name: app
         resources:
           limits:
@@ -879,7 +879,7 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: keycloak
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
     app.kubernetes.io/instance: keycloak
     app.kubernetes.io/name: keycloak
@@ -898,13 +898,13 @@ spec:
       labels:
         amispec.io/cluster-id: local
         amispec.io/component-id: keycloak
-        amispec.io/passport: stateless-app.1.0.0-rev1
+        amispec.io/passport: test-org.stateless-app.1.0.0-rev1
         amispec.io/stage: 05-applications
         app.kubernetes.io/instance: keycloak
         app.kubernetes.io/name: keycloak
     spec:
       containers:
-      - image: stateless-app:1.0.0
+      - image: docker.io/library/busybox:stable@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         name: app
         resources:
           limits:
@@ -924,7 +924,7 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
   name: web-pdb
   namespace: dmz-public
@@ -940,7 +940,7 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: keycloak
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
   name: keycloak-pdb
   namespace: default
@@ -960,13 +960,13 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
   name: web-bindings
   namespace: dmz-public
 stringData:
   _amispec.component: web
-  _amispec.passport: stateless-app.1.0.0-rev1
+  _amispec.passport: test-org.stateless-app.1.0.0-rev1
 type: Opaque
 ---
 apiVersion: v1
@@ -978,13 +978,13 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: keycloak
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
   name: keycloak-bindings
   namespace: default
 stringData:
   _amispec.component: keycloak
-  _amispec.passport: stateless-app.1.0.0-rev1
+  _amispec.passport: test-org.stateless-app.1.0.0-rev1
 type: Opaque
 === clusters/local/05-applications/routes.yaml ===
 apiVersion: v1
@@ -993,7 +993,7 @@ metadata:
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/stage: 05-applications
   name: web
   namespace: dmz-public
@@ -1024,7 +1024,7 @@ metadata:
     amispec.io/component-id: web
     amispec.io/endpoint: web
     amispec.io/lb-layer: l7-gateway
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: public
     amispec.io/stage: 05-applications
     amispec.io/via-balancer: main-l7
@@ -1069,7 +1069,7 @@ metadata:
     amispec.io/component-id: web
     amispec.io/endpoint: admin
     amispec.io/lb-layer: l7-gateway
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: protected
     amispec.io/stage: 05-applications
     amispec.io/via-balancer: main-l7
@@ -1106,7 +1106,7 @@ metadata:
     amispec.io/component-id: web
     amispec.io/endpoint: mqtt
     amispec.io/lb-layer: l4-balancer
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: public
     amispec.io/stage: 05-applications
     amispec.io/via-balancer: mqtt-l4
@@ -1143,6 +1143,9 @@ metadata:
   namespace: kube-system
 spec:
   egress:
+  - toEntities:
+    - cluster
+    - host
   - toEndpoints:
     - matchLabels:
         k8s:k8s-app: kube-dns
@@ -1229,7 +1232,7 @@ metadata:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
     amispec.io/endpoint: admin
-    amispec.io/passport: stateless-app.1.0.0-rev1
+    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: protected
     amispec.io/stage: 06-zero-trust-and-observability
     amispec.io/via-balancer: main-l7

@@ -27,7 +27,13 @@ fn fixture_passports() -> PassportIndex {
     let raw = r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: stateless-app, name: App, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+metadata: { id: stateless-app, publisher: test-org, title: App, description: Test fixture, version: "1.0.0", passportRev: 1, category: application, archetype: stateless-app }
+workload:
+  engine: k8s-deployment
+  priorityClass: stateless-web
+  container:
+    image: docker.io/library/busybox:stable
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 interfaces:
   egressDefaultMode: graph-only
   endpoints:
@@ -37,6 +43,25 @@ interfaces:
 "#;
     let mut idx = PassportIndex::new();
     idx.insert(amispec_compile::PassportSummary::from_passport_yaml(raw).unwrap());
+    let pg = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { id: postgresql, publisher: test-org, title: PG, description: Test fixture, version: "18.0.0", passportRev: 6, category: database, archetype: stateful-service }
+workload:
+  engine: k8s-statefulset
+  priorityClass: stateful-core
+  container:
+    image: 'docker.io/library/busybox:stable'
+    imageDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints:
+    - { name: sql, protocol: tcp, containerPort: 5432, role: datastore, defaultScope: cluster-private }
+  provides:
+    - { slot: sql-cluster, capability: postgres-sql, dialect: postgresql, version: "18.0.0" }
+  requires: {}
+"#;
+    idx.insert(amispec_compile::PassportSummary::from_passport_yaml(pg).unwrap());
     idx
 }
 
@@ -128,7 +153,7 @@ fn roundtrip_compile_decompile_preserves_components() {
         .clusters
         .iter()
         .flat_map(|c| &c.components)
-        .find(|c| c.passport == "postgresql")
+        .find(|c| c.passport == "test-org/postgresql")
         .expect("pg in fixture");
     let new_pg = rebuilt
         .clusters
@@ -206,10 +231,14 @@ fn sidecar_pre_stop_only_for_standard_container() {
     use amispec_compile::{ClientSidecar, PassportIndex, PassportSummary, SidecarListener};
     let mut idx = PassportIndex::new();
     idx.insert(PassportSummary {
-        id: "stateless-app".into(),
+        id: "test-org/stateless-app".into(),
         version: "1.0.0".into(),
         passport_rev: 1,
         stateful: false,
+        data_mount_path: None,
+        image: Some("docker.io/library/busybox:stable".into()),
+        image_digest: None,
+        engine: "k8s-deployment".into(),
         client_sidecars: vec![(
             vec!["standalone".into()],
             ClientSidecar {
@@ -236,6 +265,19 @@ fn sidecar_pre_stop_only_for_standard_container() {
             default_subdomain: None,
         }],
     });
+    idx.insert(PassportSummary {
+        id: "test-org/postgresql".into(),
+        version: "18.0.0".into(),
+        passport_rev: 6,
+        stateful: true,
+        data_mount_path: None,
+        image: Some("docker.io/library/busybox:stable".into()),
+        image_digest: None,
+        engine: "k8s-deployment".into(),
+        client_sidecars: vec![],
+        endpoints: vec![],
+    });
+
     let topo = load_topology("topology-minimal.yaml");
     let result = compile(&topo, &idx, &Options::dry()).unwrap();
     let workloads = result
@@ -260,7 +302,7 @@ fn roundtrip_preserves_autoscaling() {
     let yaml = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: demo, organization: ex }
+metadata: { publisher: test-org, projectId: demo, organization: ex }
 clusters:
   - id: local
     name: Local
@@ -273,7 +315,7 @@ clusters:
         hardware: { cpuCores: 2, memoryMb: 4096, disks: [] }
     components:
       - id: workers
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology:
@@ -291,7 +333,7 @@ clusters:
     let _ = std::fs::remove_dir_all(&out);
     compile(
         &topo,
-        &PassportIndex::default(),
+        &fixture_passports(),
         &Options {
             out_dir: out.clone(),
             provenance: true,
@@ -324,7 +366,7 @@ fn multi_cluster_roundtrip() {
     let yaml = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: multi, organization: ex }
+metadata: { publisher: test-org, projectId: multi, organization: ex }
 clusters:
   - id: prod-eu
     name: Prod
@@ -337,7 +379,7 @@ clusters:
         hardware: { cpuCores: 2, memoryMb: 4096, disks: [] }
     components:
       - id: pg-main
-        passport: postgresql
+        passport: test-org/postgresql
         version: "18.0.0"
         passportRev: 6
         topology: { mode: strict-ha, replicas: 3, committedReplicas: 3 }
@@ -354,7 +396,7 @@ clusters:
         hardware: { cpuCores: 2, memoryMb: 4096, disks: [] }
     components:
       - id: pg-dr
-        passport: postgresql
+        passport: test-org/postgresql
         version: "18.0.0"
         passportRev: 6
         topology: { mode: degraded-ha, replicas: 2 }
@@ -378,7 +420,7 @@ crossClusterLinks:
     let _ = std::fs::remove_dir_all(&out);
     let result = compile(
         &topo,
-        &PassportIndex::default(),
+        &fixture_passports(),
         &Options {
             out_dir: out.clone(),
             provenance: true,
@@ -421,7 +463,7 @@ fn stateful_passport_uses_statefulset() {
     let yaml = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: st, organization: ex }
+metadata: { publisher: test-org, projectId: st, organization: ex }
 clusters:
   - id: local
     name: L
@@ -434,13 +476,13 @@ clusters:
         hardware: { cpuCores: 2, memoryMb: 4096, disks: [] }
     components:
       - id: pg
-        passport: postgresql
+        passport: test-org/postgresql
         version: "18.0.0"
         passportRev: 6
         topology: { mode: standalone }
         resources: { cpuCores: 2, memoryMb: 2048 }
       - id: web
-        passport: stateless-app
+        passport: test-org/stateless-app
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
@@ -448,7 +490,7 @@ clusters:
     bindings: []
 "#;
     let topo = parse_topology(yaml).unwrap();
-    let result = compile(&topo, &PassportIndex::default(), &Options::dry()).unwrap();
+    let result = compile(&topo, &fixture_passports(), &Options::dry()).unwrap();
     let stateful = result
         .files
         .iter()
@@ -470,7 +512,7 @@ fn compile_rejects_empty_clusters() {
     let yaml = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: empty, organization: ex }
+metadata: { publisher: test-org, projectId: empty, organization: ex }
 clusters: []
 "#;
     // clusters MinItems is schema-level; parse may still succeed depending on serde

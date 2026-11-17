@@ -370,7 +370,18 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                 }
                 None => format!("components[{i}]"),
             };
-            req_str(comp, "passport", &ppath, out);
+            if let Some(pref) = req_str(comp, "passport", &ppath, out) {
+                // GR-REF-001: `<publisher>/<id>` or a private spec path.
+                if !crate::patterns::is_passport_ref(&pref) {
+                    out.push(Finding::error(
+                        format!("{ppath}.passport"),
+                        "passport-ref-regex",
+                        format!(
+                            "passport `{pref}` MUST be <publisher>/<id> or .amiterra/private-specs/<slug>.yaml (GR-REF-001)"
+                        ),
+                    ));
+                }
+            }
             req_str(comp, "version", &ppath, out);
             match get(comp, "passportRev").and_then(as_i64) {
                 Some(n) if n >= 1 => {}
@@ -521,6 +532,21 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
             }
 
             if let Some(wo) = comp.get("workloadOverride") {
+                // GR-IMG-001: overrides carry the same image+digest pair.
+                if let Some(img) = get(wo, "image").and_then(as_str) {
+                    req_str(wo, "imageDigest", &format!("{ppath}.workloadOverride"), out);
+                    // GR-IMG-005: outside the allowlist — warn, never block
+                    // (the override is the client's ground).
+                    if !crate::rules::passport::image_registry_allowed(img) {
+                        out.push(Finding::warning(
+                            format!("{ppath}.workloadOverride.image"),
+                            "override-registry-not-allowed",
+                            format!(
+                                "override image `{img}` is outside the GR-IMG-002 allowlist —                                  outside the curated catalog, at your own risk"
+                            ),
+                        ));
+                    }
+                }
                 if let Some(d) = opt_str(wo, "imageDigest") {
                     if !is_sha256_digest(d) {
                         out.push(Finding::error(

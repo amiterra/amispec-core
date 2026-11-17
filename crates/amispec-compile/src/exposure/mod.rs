@@ -1038,6 +1038,7 @@ mod tests {
 
     fn component(id: &str) -> ComponentInstance {
         ComponentInstance {
+            storage: None,
             id: id.into(),
             passport: "stateless-app".into(),
             version: "1.0.0".into(),

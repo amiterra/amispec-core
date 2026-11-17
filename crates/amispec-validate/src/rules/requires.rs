@@ -42,6 +42,30 @@ pub fn check(root: &Map, catalog: &BTreeMap<String, PassportSlots>, out: &mut Ve
             location: String,
         }
         let mut edges: Vec<Edge> = Vec::new();
+        // GR-VER-001: components[].version MUST match the passport's effective
+        // version (explicit or derived from a version-ful image tag).
+        for (pi, comp) in comps.iter().enumerate() {
+            let Some(pref) = opt_str(comp, "passport") else {
+                continue;
+            };
+            let Some(pslots) = catalog.get(pref) else {
+                continue;
+            };
+            if let Some(expected) = &pslots.version {
+                if let Some(v) = opt_str(comp, "version") {
+                    if v != expected.as_str() {
+                        out.push(Finding::error(
+                            format!("{cpath}.components[{pi}].version"),
+                            "version-topology-mismatch",
+                            format!(
+                                "component version `{v}` does not match passport `{pref}`                                  effective version `{expected}` (GR-VER-001)"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         for (pi, comp) in comps.iter().enumerate() {
             let ppath = format!("{cpath}.components[{pi}]");
             let comp_id = opt_str(comp, "id").unwrap_or_default().to_string();
@@ -164,6 +188,109 @@ pub fn check(root: &Map, catalog: &BTreeMap<String, PassportSlots>, out: &mut Ve
                     continue;
                 };
 
+                // GR-CRED-002/004: the consumer's credential grants must be
+                // enforceable by the provider and enabled on the instance.
+                let resolved_slot: Option<String> = match &edge.to_slot {
+                    Some(ts) => Some(ts.clone()),
+                    None => target_slots
+                        .provides
+                        .iter()
+                        .find(|(_, c)| c.as_str() == capability)
+                        .map(|(sl, _)| sl.clone()),
+                };
+                if let Some(rslot) = resolved_slot {
+                    // GR-VER-003: the provider's version must satisfy the
+                    // consumer's version range for the requirement slot.
+                    if let Some(range_src) = slots.requires_versions.get(slot.as_str()) {
+                        let provider_version = target_slots
+                            .provides_versions
+                            .get(&rslot)
+                            .cloned()
+                            .or_else(|| target_slots.version.clone());
+                        if let Some(pv) = provider_version {
+                            match amispec_schema::parse_version_range(range_src) {
+                                Some(clauses) => {
+                                    let ok = amispec_schema::version_in_range(&pv, &clauses)
+                                        .unwrap_or(false);
+                                    if !ok {
+                                        out.push(Finding::error(
+                                            edge.location.clone(),
+                                            "requires-version-mismatch",
+                                            format!(
+                                                "target `{}` version `{pv}` does not satisfy                                                  required range `{range_src}` of `{slot}`                                                  (GR-VER-003)",
+                                                edge.to
+                                            ),
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    out.push(Finding::error(
+                                        edge.location.clone(),
+                                        "version-range-format",
+                                        format!(
+                                            "requirement range `{range_src}` of `{slot}`                                              is invalid (GR-VER-003)"
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    let decl = target_slots.provides_access.get(&rslot);
+                    for u in slots.process_uses.iter().filter(|u| u.slot == slot.as_str()) {
+                        if let Some(d) = decl {
+                            if !d.fulfillment.is_empty() {
+                                for v in &u.verbs {
+                                    if !d.fulfillment.iter().any(|f| f.eq_ignore_ascii_case(v)) {
+                                        out.push(Finding::error(
+                                            edge.location.clone(),
+                                            "access-fulfillment",
+                                            format!(
+                                                "grant verb `{v}` ({slot}) is not in fulfillment                                                  of `{target_passport}` slot `{rslot}` (GR-CRED-002)"
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                            if !d.plugins.is_empty() {
+                                for pl in &u.plugins {
+                                    if !d.plugins.iter().any(|p| p == pl) {
+                                        out.push(Finding::error(
+                                            edge.location.clone(),
+                                            "plugin-unsupported",
+                                            format!(
+                                                "plugin `{pl}` ({slot}) is not supported by                                                  `{target_passport}` slot `{rslot}` (GR-CRED-004)"
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        if !u.plugins.is_empty() {
+                            let inst: Vec<String> = comp
+                                .get("config")
+                                .and_then(|c| c.get("plugins"))
+                                .and_then(as_seq)
+                                .map(|ps| {
+                                    ps.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            for pl in &u.plugins {
+                                if !inst.iter().any(|p| p == pl) {
+                                    out.push(Finding::error(
+                                        format!("{ppath}.config.plugins"),
+                                        "plugin-unclosed",
+                                        format!(
+                                            "process plugin `{pl}` ({slot}) requires config.plugins                                              of component `{comp_id}` to include it (GR-CRED-004)"
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 match &edge.to_slot {
                     Some(to_slot) => match target_slots.provides.get(to_slot) {
                         Some(provided) if provided == capability => {}
@@ -221,7 +348,7 @@ mod tests {
             r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: youtrack, name: YouTrack, version: "1.0.0", passportRev: 3 }
+metadata: { publisher: test-org, id: youtrack, title: YouTrack, description: Test fixture, version: "1.0.0", passportRev: 3 }
 interfaces:
   egressDefaultMode: graph-only
   endpoints: []
@@ -233,7 +360,7 @@ interfaces:
             r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: balancer-cilium-l7, name: Balancer, version: "1.0.0", passportRev: 1 }
+metadata: { publisher: test-org, id: balancer-cilium-l7, title: Balancer, description: Test fixture, version: "1.0.0", passportRev: 1 }
 interfaces:
   egressDefaultMode: graph-only
   endpoints: []
@@ -244,7 +371,7 @@ interfaces:
             r#"
 apiVersion: catalog.amispec.io/v1
 kind: ComponentPassport
-metadata: { id: postgresql, name: PG, version: "18.0.0", passportRev: 6 }
+metadata: { publisher: test-org, id: postgresql, title: PG, description: Test fixture, version: "18.0.0", passportRev: 6 }
 interfaces:
   egressDefaultMode: graph-only
   endpoints: []
@@ -264,7 +391,7 @@ interfaces:
     const PREFIX: &str = r#"
 apiVersion: topology.amispec.io/v1
 kind: TopologyBlueprint
-metadata: { projectId: demo, organization: ex }
+metadata: { publisher: test-org, projectId: demo, organization: ex }
 clusters:
   - id: c0
     name: Demo
@@ -278,19 +405,19 @@ clusters:
         hardware: { cpuCores: 2, memoryMb: 4096, disks: [] }
     components:
       - id: yt
-        passport: youtrack
+        passport: test-org/youtrack
         version: "1.0.0"
         passportRev: 3
         topology: { mode: standalone }
         resources: { cpuCores: 1, memoryMb: 256 }
       - id: bal
-        passport: balancer-cilium-l7
+        passport: test-org/balancer-cilium-l7
         version: "1.0.0"
         passportRev: 1
         topology: { mode: standalone }
         resources: { cpuCores: 1, memoryMb: 256 }
       - id: pg
-        passport: postgresql
+        passport: test-org/postgresql
         version: "18.0.0"
         passportRev: 6
         topology: { mode: standalone }
@@ -365,7 +492,7 @@ clusters:
 
     #[test]
     fn rejects_passport_missing_from_catalog() {
-        let yaml = PREFIX.replace("passport: youtrack", "passport: mystery-app");
+        let yaml = PREFIX.replace("passport: test-org/youtrack", "passport: mystery-app");
         let r = report(&yaml);
         assert!(
             r.errors().any(|e| e.rule == "passport-not-in-catalog"),
@@ -384,4 +511,158 @@ clusters:
             r.findings
         );
     }
+
+    #[test]
+    fn version_must_match_passport_effective_version() {
+        let yaml = PREFIX.replace("version: \"1.0.0\"", "version: \"2.0.0\"");
+        let rep = validate_str_with_catalog("t", &yaml, &Options::default(), &catalog());
+        assert!(
+            rep.errors().any(|f| f.rule == "version-topology-mismatch"),
+            "{:?}",
+            rep.errors().collect::<Vec<_>>()
+        );
+    }
+
+    fn cred_catalog() -> BTreeMap<String, PassportSlots> {
+        let provider = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { publisher: test-org, id: db, title: DB, description: Fixture, version: "1.0.0", passportRev: 1 }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints: []
+  provides:
+    - { slot: sql, capability: postgres-sql, version: "1.0.0", access: { fulfillment: [select, insert], plugins: [postgis] } }
+  requires: {}
+"#;
+        let consumer = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { publisher: test-org, id: app, title: App, description: Fixture, version: "1.0.0", passportRev: 1 }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints: []
+  provides: []
+  requires:
+    database: { capability: postgres-sql }
+processes:
+  app:
+    uses:
+      - slot: database
+        grants:
+          - { verbs: [select, drop], resources: ["table:*"] }
+        plugins: [postgis]
+"#;
+        let mut cat = BTreeMap::new();
+        for raw in [provider, consumer] {
+            let slots = parse_passport_slots(raw).unwrap();
+            cat.insert(slots.id.clone(), slots);
+        }
+        cat
+    }
+
+    fn cred_topology(extra_config: &str) -> String {
+        format!(
+            r#"apiVersion: topology.amispec.io/v1
+kind: TopologyBlueprint
+metadata: {{ projectId: demo, organization: ex }}
+clusters:
+  - id: local
+    name: Local
+    domain: example.local
+    security: {{ sopsRecipients: [age1abc] }}
+    cni: {{ engine: cilium-ebpf, clusterMeshId: 1 }}
+    nodes:
+      - id: n1
+        role: control-plane-worker
+        hardware: {{ cpuCores: 2, memoryMb: 4096, disks: [] }}
+    components:
+      - id: app
+        passport: test-org/app
+        version: "1.0.0"
+        passportRev: 1{extra_config}
+      - id: db
+        passport: test-org/db
+        version: "1.0.0"
+        passportRev: 1
+    bindings:
+      - {{ from: app, to: db, toSlot: sql, asRequirement: database }}
+"#
+        )
+    }
+
+    #[test]
+    fn grants_must_be_in_provider_fulfillment() {
+        let rep = validate_str_with_catalog("t", &cred_topology(""), &Options::default(), &cred_catalog());
+        assert!(
+            rep.errors().any(|f| f.rule == "access-fulfillment"),
+            "expected access-fulfillment for verb `drop`, got {:?}",
+            rep.errors().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn process_plugins_need_instance_config() {
+        // plugins not enabled on the instance -> plugin-unclosed
+        let rep = validate_str_with_catalog("t", &cred_topology(""), &Options::default(), &cred_catalog());
+        assert!(
+            rep.errors().any(|f| f.rule == "plugin-unclosed"),
+            "expected plugin-unclosed, got {:?}",
+            rep.errors().collect::<Vec<_>>()
+        );
+        // enabling config.plugins clears it (but access-fulfillment remains)
+        let rep = validate_str_with_catalog(
+            "t",
+            &cred_topology("\n        config: { plugins: [postgis] }"),
+            &Options::default(),
+            &cred_catalog(),
+        );
+        assert!(!rep.errors().any(|f| f.rule == "plugin-unclosed"));
+    }
+
+
+    #[test]
+    fn provider_version_must_satisfy_required_range() {
+        // catalog: provider 17.11 (explicit provides version), consumer wants >=18
+        let provider = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { publisher: test-org, id: db, title: DB, description: Fixture, version: "17.11", passportRev: 1 }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints: []
+  provides:
+    - { slot: sql, capability: postgres-sql, version: "17.11" }
+  requires: {}
+"#;
+        let consumer = r#"
+apiVersion: catalog.amispec.io/v1
+kind: ComponentPassport
+metadata: { publisher: test-org, id: app, title: App, description: Fixture, version: "1.0.0", passportRev: 1 }
+interfaces:
+  egressDefaultMode: graph-only
+  endpoints: []
+  provides: []
+  requires:
+    database: { capability: postgres-sql, version: ">=18.0" }
+"#;
+        let mut cat = BTreeMap::new();
+        for raw in [provider, consumer] {
+            let slots = parse_passport_slots(raw).unwrap();
+            cat.insert(slots.id.clone(), slots);
+        }
+        let rep = validate_str_with_catalog("t", &cred_topology(""), &Options::default(), &cat);
+        assert!(
+            rep.errors().any(|f| f.rule == "requires-version-mismatch"),
+            "expected requires-version-mismatch, got {:?}",
+            rep.errors().collect::<Vec<_>>()
+        );
+        // and a satisfied range passes
+        let consumer2 = consumer.replace(">=18.0", ">=16.0 <18.0");
+        let slots = parse_passport_slots(&consumer2).unwrap();
+        cat.insert(slots.id.clone(), slots);
+        let rep = validate_str_with_catalog("t", &cred_topology(""), &Options::default(), &cat);
+        assert!(!rep.errors().any(|f| f.rule == "requires-version-mismatch"));
+    }
+
 }

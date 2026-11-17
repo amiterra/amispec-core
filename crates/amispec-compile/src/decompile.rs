@@ -128,6 +128,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                 let entry = cb.components.entry(cid.clone()).or_insert_with(|| {
                     let pin = get_str(labels, LABEL_PASSPORT).and_then(|p| parse_passport_pin(&p));
                     ComponentInstance {
+                        storage: None,
                         id: cid,
                         passport: pin
                             .as_ref()
@@ -315,6 +316,7 @@ struct ClusterBuilder {
 
 fn blank_component(id: &str) -> ComponentInstance {
     ComponentInstance {
+        storage: None,
         id: id.into(),
         passport: "unknown".into(),
         version: "0.0.0".into(),
@@ -545,8 +547,13 @@ fn apply_user_delta(comp: &mut ComponentInstance, delta_json: &str) {
         .pointer("/workloadOverride/image")
         .and_then(|x| x.as_str())
     {
+        let image_digest = v
+            .pointer("/workloadOverride/imageDigest")
+            .and_then(|x| x.as_str())
+            .map(String::from);
         comp.workload_override = Some(amispec_schema::WorkloadOverride {
             image: Some(image.to_string()),
+            image_digest,
         });
     }
 }
