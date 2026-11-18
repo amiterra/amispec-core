@@ -258,6 +258,7 @@ fn v3_roundtrip_restores_all_exposure_fields() {
             out_dir: out.clone(),
             provenance: true,
             dry_run: false,
+            adapter_dir: None,
         },
     )
     .unwrap();

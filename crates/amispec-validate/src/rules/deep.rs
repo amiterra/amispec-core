@@ -681,6 +681,23 @@ pub fn check_volumes_map(volumes: &Yaml, path: &str, out: &mut Vec<Finding>) {
     }
 }
 
+/// Check topology `volumes` — size overrides (`#VolumeTopologyOverride`), not
+/// full volume specs: mountPath/minSizeGb/defaultSizeGb come from the passport
+/// (CUE `topology_spec.cue` keeps this override shape normative).
+pub fn check_volumes_override_map(volumes: &Yaml, path: &str, out: &mut Vec<Finding>) {
+    let Some(m) = as_map(volumes) else {
+        out.push(Finding::error(
+            path,
+            "type-map",
+            "volumes MUST be a mapping",
+        ));
+        return;
+    };
+    for (k, v) in m {
+        check_storage_override(v, &format!("{path}.{}", key_str(k)), out);
+    }
+}
+
 /// Validate scriptRef when present as string.
 pub fn check_script_ref_field(parent: &Yaml, key: &str, path: &str, out: &mut Vec<Finding>) {
     if let Some(s) = opt_str(parent, key) {
@@ -709,15 +726,51 @@ pub fn check_digest_field(parent: &Yaml, key: &str, path: &str, out: &mut Vec<Fi
 
 /// Check `workload.operatorSpec` required fields.
 pub fn check_operator_spec(op: &Yaml, path: &str, out: &mut Vec<Finding>) {
-    for key in [
-        "operatorHelmChart",
-        "operatorVersion",
-        "crdApiVersion",
-        "crdKind",
-        "manifestTemplate",
-    ] {
+    for key in ["operatorHelmChart", "operatorVersion", "crdApiVersion", "crdKind"] {
         req_str(op, key, path, out);
     }
+    // GR-OPR-006: the passport pins its adapter pack (supplier of the operator
+    // and mapper of the CR) — `<publisher>/<id>@rev<N>`.
+    match opt_str(op, "adapter") {
+        Some(a) => {
+            if !valid_adapter_pin(&a) {
+                out.push(Finding::error(
+                    format!("{path}.adapter"),
+                    "adapter-pin-format",
+                    format!(
+                        "adapter pin `{a}` MUST match <publisher>/<id>@rev<N> (GR-OPR-006)"
+                    ),
+                ));
+            }
+        }
+        None => out.push(Finding::error(
+            format!("{path}.adapter"),
+            "required",
+            "adapter is required: the passport MUST pin its adapter pack (GR-OPR-006)",
+        )),
+    }
+}
+
+/// `<publisher>/<id>@rev<N>` — slug grammar per GR-META-002 plus a rev suffix.
+fn valid_adapter_pin(a: &str) -> bool {
+    let Some((ids, rev)) = a.split_once("@rev") else {
+        return false;
+    };
+    let Some((publisher, id)) = ids.split_once('/') else {
+        return false;
+    };
+    let slug = |s: &str, max: usize| {
+        !s.is_empty()
+            && s.len() <= max
+            && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !s.starts_with('-')
+            && !s.ends_with('-')
+    };
+    !rev.is_empty()
+        && rev.chars().all(|c| c.is_ascii_digit())
+        && rev.trim_start_matches('0') == rev
+        && slug(publisher, 32)
+        && slug(id, 40)
 }
 
 /// Check `liveMigration` supportedSources list.

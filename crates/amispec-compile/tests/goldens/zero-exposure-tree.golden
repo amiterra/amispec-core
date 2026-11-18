@@ -86,28 +86,7 @@ kind: Kustomization
 resources:
 - jobs.yaml
 === clusters/local/04b-app-migrations-expand/jobs.yaml ===
-apiVersion: batch/v1
-kind: Job
-metadata:
-  labels:
-    amispec.io/cluster-id: local
-    amispec.io/component-id: web
-    amispec.io/stage: 04b-app-migrations-expand
-  name: migrate-expand-web-a1897b25
-  namespace: default
-spec:
-  backoffLimit: 3
-  template:
-    spec:
-      containers:
-      - command:
-        - sh
-        - -c
-        - echo expand-schema && exit 0
-        image: busybox:1.36
-        name: migrate
-      restartPolicy: Never
-  ttlSecondsAfterFinished: 86400
+[]
 === clusters/local/04b-app-migrations-expand/kustomization.yaml ===
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -121,7 +100,6 @@ kind: Deployment
 metadata:
   annotations:
     amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
-    reloader.stakater.com/auto: 'true'
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
@@ -140,7 +118,6 @@ spec:
     metadata:
       annotations:
         amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
-        reloader.stakater.com/auto: 'true'
       labels:
         amispec.io/cluster-id: local
         amispec.io/component-id: web
@@ -158,10 +135,6 @@ spec:
           requests:
             cpu: '1'
             memory: 256Mi
-      securityContext:
-        fsGroup: 10001
-        runAsNonRoot: true
-        runAsUser: 10001
       terminationGracePeriodSeconds: 65
 === clusters/local/05-applications/pdb.yaml ===
 apiVersion: policy/v1
@@ -181,23 +154,33 @@ spec:
       app.kubernetes.io/name: web
 === clusters/local/05-applications/hpa.yaml ===
 []
-=== clusters/local/05-applications/secrets.yaml ===
+=== clusters/local/05-applications/services.yaml ===
 apiVersion: v1
-kind: Secret
+kind: Service
 metadata:
-  annotations:
-    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
   labels:
-    amispec.io/cluster-id: local
-    amispec.io/component-id: web
-    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
-    amispec.io/stage: 05-applications
-  name: web-bindings
+    app.kubernetes.io/instance: web
+    app.kubernetes.io/name: web
+  name: web
   namespace: default
-stringData:
-  _amispec.component: web
-  _amispec.passport: test-org.stateless-app.1.0.0-rev1
-type: Opaque
+spec:
+  ports:
+  - name: web
+    port: 8080
+    targetPort: 8080
+  - name: admin
+    port: 9090
+    targetPort: 9090
+  - name: mqtt
+    port: 1883
+    targetPort: 1883
+  selector:
+    app.kubernetes.io/name: web
+  type: ClusterIP
+=== clusters/local/05-applications/configmaps.yaml ===
+[]
+=== clusters/local/05-applications/pvc.yaml ===
+[]
 === clusters/local/05-applications/routes.yaml ===
 []
 === clusters/local/05-applications/kustomization.yaml ===
@@ -208,7 +191,9 @@ resources:
 - workloads.yaml
 - pdb.yaml
 - hpa.yaml
-- secrets.yaml
+- services.yaml
+- configmaps.yaml
+- pvc.yaml
 - routes.yaml
 === clusters/local/06-zero-trust-and-observability/netpols.yaml ===
 apiVersion: cilium.io/v2

@@ -76,6 +76,7 @@ fn compile_minimal_topology_emits_stage_tree() {
             out_dir: out.clone(),
             provenance: true,
             dry_run: false,
+            adapter_dir: None,
         },
     )
     .expect("compile");
@@ -123,6 +124,7 @@ fn roundtrip_compile_decompile_preserves_components() {
             out_dir: out.clone(),
             provenance: true,
             dry_run: false,
+            adapter_dir: None,
         },
     )
     .unwrap();
@@ -178,12 +180,15 @@ fn provenance_labels_present_on_workloads() {
     assert!(apps.contents.contains("amispec.io/component-id"));
     assert!(apps.contents.contains("amispec.io/passport"));
     assert!(apps.contents.contains("amispec.io/user-spec-delta"));
-    let secrets = result
-        .files
-        .iter()
-        .find(|f| f.relative_path.contains("05-applications/secrets.yaml"))
-        .expect("secrets file");
-    assert!(secrets.contents.contains("amispec.io/binding-edge"));
+    // B3 / ADR-0009: no placeholder Secret objects in the compiled tree —
+    // secret MATERIAL is install-time; manifests only reference names.
+    for f in &result.files {
+        assert!(
+            !f.contents.contains("kind: Secret"),
+            "compiled tree must not contain Secret objects ({})",
+            f.relative_path
+        );
+    }
 }
 
 #[test]
@@ -204,7 +209,8 @@ fn compiler_invariants_present() {
     );
     // Provenance user-spec-delta
     assert!(workloads.contains("amispec.io/user-spec-delta"));
-    // jobs have ttlSecondsAfterFinished and hash suffix
+    // Provisioner/migration Jobs are contract-driven: no declared provisioner
+    // or preDeployExpandCommand → no stub jobs (GR: no implicit provisioning).
     let jobs = result
         .files
         .iter()
@@ -212,8 +218,21 @@ fn compiler_invariants_present() {
         .unwrap()
         .contents
         .clone();
-    assert!(jobs.contains("ttlSecondsAfterFinished"));
-    assert!(jobs.contains("provision-"));
+    assert!(
+        !jobs.contains("provision-"),
+        "implicit provisioner stubs must not be emitted"
+    );
+    let mig = result
+        .files
+        .iter()
+        .find(|f| f.relative_path.contains("04b-app-migrations"))
+        .unwrap()
+        .contents
+        .clone();
+    assert!(
+        !mig.contains("migrate-expand-"),
+        "implicit migration stubs must not be emitted"
+    );
     // CIDR formula in networking
     let net = result
         .files
@@ -264,6 +283,26 @@ fn sidecar_pre_stop_only_for_standard_container() {
             default_scope: None,
             default_subdomain: None,
         }],
+        command: Vec::new(),
+        container_name: None,
+        args: Vec::new(),
+        operator_spec: None,
+        scripts: Vec::new(),
+        param_defaults: Default::default(),
+        param_target_paths: Default::default(),
+        requires_env: Default::default(),
+        processes: Default::default(),
+        backup: None,
+        has_provisioner: false,
+        config_mounts: Vec::new(),
+        shm_size_mb: None,
+        env_decls: Vec::new(),
+        ports: Vec::new(),
+        security_context: None,
+        probes: Default::default(),
+        update_strategies: Default::default(),
+        exported_tokens: Default::default(),
+        pre_deploy_script: None,
     });
     idx.insert(PassportSummary {
         id: "test-org/postgresql".into(),
@@ -276,6 +315,26 @@ fn sidecar_pre_stop_only_for_standard_container() {
         engine: "k8s-deployment".into(),
         client_sidecars: vec![],
         endpoints: vec![],
+        command: Vec::new(),
+        container_name: None,
+        args: Vec::new(),
+        operator_spec: None,
+        scripts: Vec::new(),
+        param_defaults: Default::default(),
+        param_target_paths: Default::default(),
+        requires_env: Default::default(),
+        processes: Default::default(),
+        backup: None,
+        has_provisioner: false,
+        config_mounts: Vec::new(),
+        shm_size_mb: None,
+        env_decls: Vec::new(),
+        ports: Vec::new(),
+        security_context: None,
+        probes: Default::default(),
+        update_strategies: Default::default(),
+        exported_tokens: Default::default(),
+        pre_deploy_script: None,
     });
 
     let topo = load_topology("topology-minimal.yaml");
@@ -338,6 +397,7 @@ clusters:
             out_dir: out.clone(),
             provenance: true,
             dry_run: false,
+            adapter_dir: None,
         },
     )
     .unwrap();
@@ -425,6 +485,7 @@ crossClusterLinks:
             out_dir: out.clone(),
             provenance: true,
             dry_run: false,
+            adapter_dir: None,
         },
     )
     .unwrap();
@@ -540,6 +601,7 @@ fn write_files_creates_tree() {
             out_dir: out.clone(),
             provenance: true,
             dry_run: false,
+            adapter_dir: None,
         },
     )
     .unwrap();

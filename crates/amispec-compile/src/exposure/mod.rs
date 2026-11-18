@@ -63,6 +63,11 @@ pub struct ResolvedExposure<'a> {
     pub path: String,
     /// Backend port from the passport endpoint contract (ADR 0009).
     pub backend_port: u16,
+    /// Endpoint protocol (`http`, `tcp`, ...) from the passport contract.
+    pub backend_protocol: String,
+    /// Total exposure artifacts this component produces (1 → Service is named
+    /// after the component; more → `<component>-<endpoint>`).
+    pub component_exposure_count: usize,
     /// `id@version-rev` passport pin of the component.
     pub pin: String,
 }
@@ -100,6 +105,11 @@ pub fn resolve_exposures<'a>(
     for comp in &cluster.components {
         let pin = crate::passport_pin(&comp.passport, &comp.version, comp.passport_rev);
         let summary = passports.get(&comp.passport);
+        let component_exposure_count: usize = comp
+            .expose
+            .iter()
+            .map(|e| e.via_balancer.ids().len())
+            .sum();
         for ex in &comp.expose {
             let via_ids = ex.via_balancer.ids();
             // Multi-via is an L7 HA story (several edge Gateways); an L4
@@ -130,6 +140,10 @@ pub fn resolve_exposures<'a>(
                     })?;
 
                 let backend_port = resolve_port(summary, comp, ex)?;
+                let backend_protocol = summary
+                    .and_then(|s| s.endpoints.iter().find(|e| e.name == ex.endpoint))
+                    .and_then(|e| e.protocol.clone())
+                    .unwrap_or_else(|| "http".into());
 
                 let l7 = balancer.layer == "l7-gateway";
                 let (host, host_source) = if l7 {
@@ -147,6 +161,8 @@ pub fn resolve_exposures<'a>(
                     host_source,
                     path: effective_path(ex),
                     backend_port,
+                    backend_protocol,
+                    component_exposure_count,
                     pin: pin.clone(),
                 });
             }
@@ -855,6 +871,10 @@ pub fn route_labels(
     provenance: bool,
 ) -> Map<String, Value> {
     let mut labels = exposure_labels(&ex.cluster.id, stage, provenance);
+    labels.insert("app.kubernetes.io/name".into(), json!(ex.component.id));
+    // Selector contract: the balancer's IP pool selects route Services by
+    // `amispec.io/lb-id` (must match `CiliumLoadBalancerIPPool.serviceSelector`).
+    labels.insert(LABEL_LB_ID.into(), json!(ex.balancer.id));
     if provenance {
         labels.insert(LABEL_COMPONENT_ID.into(), json!(ex.component.id));
         labels.insert(LABEL_PASSPORT.into(), json!(ex.pin));
@@ -1008,6 +1028,8 @@ mod tests {
             host_source: "default",
             path: "/".into(),
             backend_port: 8080,
+            backend_protocol: "http".into(),
+            component_exposure_count: 1,
             pin: "p@1.0.0-rev1".into(),
         }
     }
@@ -1039,6 +1061,7 @@ mod tests {
     fn component(id: &str) -> ComponentInstance {
         ComponentInstance {
             storage: None,
+            volumes: Default::default(),
             id: id.into(),
             passport: "stateless-app".into(),
             version: "1.0.0".into(),
@@ -1053,6 +1076,8 @@ mod tests {
             resources: amispec_schema::ComponentResources {
                 cpu_cores: 1.0,
                 memory_mb: 256,
+                requests: None,
+                limits: None,
             },
             zone: Some("dmz".into()),
             group: None,

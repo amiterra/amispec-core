@@ -291,6 +291,10 @@ pub struct WorkloadOverride {
     /// GR-IMG-001: overrides carry the same image+digest pair.
     #[serde(default, rename = "imageDigest")]
     pub image_digest: Option<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -321,6 +325,9 @@ pub struct ComponentInstance {
     /// Data volume declaration (`storage` in the topology schema).
     #[serde(default)]
     pub storage: Option<VolumeOverride>,
+    /// Named volume overrides (`volumes` in the topology schema: wal, ...).
+    #[serde(default)]
+    pub volumes: BTreeMap<String, VolumeOverride>,
 }
 
 /// Topology storage declaration (`storage` in CUE `#VolumeTopologyOverride`):
@@ -331,8 +338,16 @@ pub struct VolumeOverride {
     pub size_gb: u32,
     #[serde(default, rename = "committedSizeGb")]
     pub committed_size_gb: Option<u32>,
-    #[serde(rename = "mediaTier")]
+    // CUE default: *"nvme-local" — keep serde in lockstep (cue_contract).
+    #[serde(default = "default_media_tier", rename = "mediaTier")]
     pub media_tier: String,
+    /// Concrete CSI storage class name (CUE `#VolumeTopologyOverride.class`).
+    #[serde(default)]
+    pub class: Option<String>,
+}
+
+fn default_media_tier() -> String {
+    "nvme-local".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -366,6 +381,21 @@ pub struct ComponentResources {
     pub cpu_cores: f64,
     #[serde(rename = "memoryMb")]
     pub memory_mb: u64,
+    /// Explicit Burstable request envelope (default: cpuCores/memoryMb).
+    #[serde(default)]
+    pub requests: Option<ResourceEnvelope>,
+    /// Explicit limit envelope (default: memoryMb, no cpu limit).
+    #[serde(default)]
+    pub limits: Option<ResourceEnvelope>,
+}
+
+/// Request/limit envelope (`topology.resources.{requests,limits}`).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ResourceEnvelope {
+    #[serde(default, rename = "cpuCores")]
+    pub cpu_cores: Option<f64>,
+    #[serde(default, rename = "memoryMb")]
+    pub memory_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -389,6 +419,13 @@ pub struct Binding {
     pub as_requirement: Option<String>,
     #[serde(default, rename = "envPrefix")]
     pub env_prefix: Option<String>,
+    /// Per-env overrides of the generated binding environment.
+    #[serde(default, rename = "envOverrides")]
+    pub env_overrides: BTreeMap<String, String>,
+    /// GR-OPR-005: consumption parameters (database/role/secret names) —
+    /// declared per binding so N consumers of one slot stay independent.
+    #[serde(default)]
+    pub params: BTreeMap<String, serde_json::Value>,
     #[serde(default, rename = "secretRotationEpoch")]
     pub secret_rotation_epoch: Option<u32>,
     #[serde(default, rename = "type")]
@@ -677,8 +714,29 @@ pub fn parse_version_range(s: &str) -> Option<Vec<RangeClause>> {
     if t.is_empty() || t == "*" {
         return Some(Vec::new());
     }
+    // GR-VER-003 grammar allows whitespace between the comparator and the
+    // version (`>= 18.0 < 19.0`); merge a bare operator token with the version
+    // token that follows it so both spaced and glued forms parse alike.
+    let words: Vec<&str> = t.split_whitespace().collect();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        if matches!(w, ">=" | "<=" | "!=" | ">" | "<" | "=" | "==") && i + 1 < words.len() {
+            tokens.push(format!(
+                "{}{}",
+                if w == "==" { "=" } else { w },
+                words[i + 1]
+            ));
+            i += 2;
+        } else {
+            tokens.push(w.to_string());
+            i += 1;
+        }
+    }
     let mut out = Vec::new();
-    for tok in t.split_whitespace() {
+    for tok in &tokens {
+        let tok = tok.as_str();
         let (op, ver) = if let Some(rest) = tok.strip_prefix(">=") {
             (RangeOp::Ge, rest)
         } else if let Some(rest) = tok.strip_prefix("<=") {

@@ -38,7 +38,9 @@ pub use decompile::{DecompileReport, decompile, decompile_dir};
 pub use exposure::{
     ExposureArtifacts, ResolvedExposure, TlsStrategy, materialize, resolve_exposures,
 };
-pub use passport::{ClientSidecar, PassportIndex, PassportSummary, SidecarListener};
+pub use passport::{
+    ClientSidecar, PassportIndex, PassportSummary, ProbeDecl, ScriptSummary, SidecarListener,
+};
 pub use provenance::*;
 
 pub use amispec_schema::PassportEndpoint;
@@ -63,6 +65,7 @@ use amispec_schema::TopologyBlueprint;
 use manifest::Builder;
 
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Compiler options.
@@ -74,6 +77,8 @@ pub struct Options {
     pub provenance: bool,
     /// Compute artifacts without writing to disk.
     pub dry_run: bool,
+    /// Catalog `adapters/` root (operator adapter packs, GR-OPR-006).
+    pub adapter_dir: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -82,6 +87,7 @@ impl Default for Options {
             out_dir: PathBuf::from("out"),
             provenance: true,
             dry_run: false,
+            adapter_dir: None,
         }
     }
 }
@@ -130,6 +136,55 @@ pub fn compile(
         result.cluster_ids.push(cluster.id.clone());
         let root = format!("clusters/{}", cluster.id);
 
+        // --- operator adapters (GR-OPR-002/006): supply operators (stage 02)
+        // and synthesize the CR family (stage 03) via the pinned packs ---
+        let adapters = match &opts.adapter_dir {
+            Some(d) => Some(adapter::AdapterIndex::load(d)?),
+            None => None,
+        };
+        let mut adapter_outputs: BTreeMap<String, adapter::AdapterOutput> = BTreeMap::new();
+        let mut operator_installs: BTreeMap<String, String> = BTreeMap::new();
+        for comp in &cluster.components {
+            let Some(ps) = passports.get(&comp.passport) else { continue };
+            let Some(ospec) = &ps.operator_spec else { continue };
+            let Some(index) = adapters.as_ref() else {
+                return Err(CompileError::Generic(format!(
+                    "component `{}` uses engine operator-crd but Options::adapter_dir is not set",
+                    comp.id
+                )));
+            };
+            let Some(pack) = index.resolve(&ospec.adapter) else {
+                return Err(CompileError::Generic(format!(
+                    "component `{}`: adapter pin `{}` not found under the adapter catalog",
+                    comp.id, ospec.adapter
+                )));
+            };
+            let model = build_adapter_model(comp, ps, cluster)?;
+            let out = adapter::evaluate(
+                pack,
+                &model,
+                &std::env::temp_dir().join("amispec-adapter-work"),
+            )?;
+            adapter_outputs.insert(comp.id.clone(), out);
+            for (op_name, raw) in adapter::operator_installs(pack)? {
+                operator_installs.entry(op_name).or_insert(raw);
+            }
+        }
+        // Service-name derivation for bindings (GR-OPR-002): adapter names for
+        // operator providers, canonical `<component-id>` for k8s-native ones.
+        let mut provider_names: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        for comp in &cluster.components {
+            let mut m = adapter_outputs
+                .get(&comp.id)
+                .map(|o| o.names.clone())
+                .unwrap_or_default();
+            m.entry("service".into()).or_insert_with(|| comp.id.clone());
+            m.entry("rw".into()).or_insert_with(|| comp.id.clone());
+            m.entry("ro".into()).or_insert_with(|| format!("{}-ro", comp.id));
+            m.entry("pooler".into()).or_insert_with(|| format!("{}-pooler-rw", comp.id));
+            provider_names.insert(comp.id.clone(), m);
+        }
+
         // --- 00 flux-system ---
         // Seed-owned (ami gitops bootstrap, Design Doc 0026 §1.3): the compiled
         // tree must never overwrite `flux-system/` — it holds gotk-sync.yaml,
@@ -168,20 +223,28 @@ pub fn compile(
             &format!("{root}/02-operators-and-networking/networking.yaml"),
             &net_docs,
         );
-        let mut net_resources = vec!["networking.yaml"];
+        let mut net_resources_owned: Vec<String> = vec!["networking.yaml".to_string()];
+        for (op_name, raw) in &operator_installs {
+            let fname = format!("operator-{}.yaml", op_name.replace('.', "-"));
+            b.raw(&format!("{root}/02-operators-and-networking/{fname}"), raw);
+            net_resources_owned.push(fname);
+        }
+        let mut net_resources: Vec<&str> = net_resources_owned.iter().map(|s| s.as_str()).collect();
         if !artifacts.activation.is_empty() {
             b.docs(
                 &format!("{root}/02-operators-and-networking/balancer-activation.yaml"),
                 &artifacts.activation,
             );
-            net_resources.push("balancer-activation.yaml");
+            net_resources_owned.push("balancer-activation.yaml".into());
+            net_resources = net_resources_owned.iter().map(|s| s.as_str()).collect();
         }
         if !artifacts.gateways.is_empty() {
             b.docs(
                 &format!("{root}/02-operators-and-networking/gateways.yaml"),
                 &artifacts.gateways,
             );
-            net_resources.push("gateways.yaml");
+            net_resources_owned.push("gateways.yaml".into());
+            net_resources = net_resources_owned.iter().map(|s| s.as_str()).collect();
         }
         b.kustomization(
             &format!("{root}/02-operators-and-networking/kustomization.yaml"),
@@ -193,7 +256,12 @@ pub fn compile(
         let mut app_docs = Vec::new();
         let mut pdb_docs = Vec::new();
         let mut hpa_docs = Vec::new();
-        let mut secret_docs = Vec::new();
+        // Adapter CR family (operator-crd components) — stage 03 product core.
+        let mut cr_docs = Vec::new();
+        // Internal Services (k8s-native providers) + script/token ConfigMaps.
+        let mut svc_docs = Vec::new();
+        let mut cm_docs = Vec::new();
+        let mut pvc_docs = Vec::new();
 
         for comp in &cluster.components {
             result.component_ids.push(comp.id.clone());
@@ -215,34 +283,39 @@ pub fn compile(
             // user-spec-delta (lossless decompile of user values)
             let delta = user_spec_delta(comp);
 
-            // Secrets stubs for bindings + license/pull refs
-            // Include inline bindings and cluster-level edges that start from this component.
-            let mut edges: Vec<String> = comp
-                .bindings
-                .iter()
-                .map(|b| {
-                    format!(
-                        "{}->{}:{}",
-                        comp.id,
-                        b.to,
-                        b.to_slot.clone().unwrap_or_default()
-                    )
-                })
-                .collect();
-            for b in &cluster.bindings {
-                if b.from.as_deref() == Some(comp.id.as_str()) {
-                    let edge = format!(
-                        "{}->{}:{}",
-                        comp.id,
-                        b.to,
-                        b.to_slot.clone().unwrap_or_default()
-                    );
-                    if !edges.contains(&edge) {
-                        edges.push(edge);
+            // operator-crd components: the adapter synthesized the CR family
+            // (cluster/pooler/backup) — no local workload/PDB/HPA/Service.
+            if let Some(out) = adapter_outputs.get(&comp.id) {
+                cr_docs.extend(out.docs.iter().cloned());
+                if let Some(ps) = passport {
+                    cm_docs.extend(script_config_maps(comp, ps));
+                    if let Some(cm) = exported_tokens_config_map(comp, ps) {
+                        cm_docs.push(cm);
                     }
                 }
+                continue;
             }
-            secret_docs.push(binding_secret(&cluster.id, comp, &pin, &delta, &edges));
+
+            // Secrets (B3/ADR-0009): referenced by NAME from env/secrets —
+            // the material is install-time (apply-secrets.sh / sops), never
+            // placeholder objects in Git.
+
+            // Script ConfigMaps (declared scripts) + exported token ConfigMap.
+            if let Some(ps) = passport {
+                cm_docs.extend(script_config_maps(comp, ps));
+                if let Some(cm) = exported_tokens_config_map(comp, ps) {
+                    cm_docs.push(cm);
+                }
+            }
+
+            // Internal Service for non-exposed k8s-native providers
+            // (exposed components get their Service from the exposure pipeline).
+            if comp.expose.is_empty() {
+                if let (Some(ps), Some(svc)) = (passport, passport.and_then(|p| endpoint_service(comp, p))) {
+                    let _ = ps;
+                    svc_docs.push(svc);
+                }
+            }
 
             // Workload object
             let sidecars = passport
@@ -261,9 +334,9 @@ pub fn compile(
                 &sidecar_names,
                 opts.provenance,
                 cluster.maintenance_window.as_deref(),
-                passports
-                    .get(&comp.passport)
-                    .and_then(|s| s.data_mount_path.as_deref()),
+                passport,
+                cluster,
+                &provider_names,
                 &resolved_image,
                 passports
                     .get(&comp.passport)
@@ -274,6 +347,9 @@ pub fn compile(
                 stateful_docs.push(workload);
             } else {
                 app_docs.push(workload);
+                if let Some(pvc) = persistent_volume_claim(&cluster.id, comp, &pin, opts.provenance) {
+                    pvc_docs.push(pvc);
+                }
             }
 
             // PDB
@@ -294,25 +370,33 @@ pub fn compile(
             &format!("{root}/03-stateful-clusters/stateful.yaml"),
             &stateful_docs,
         );
+        // Adapter CR family (operator-crd product objects, GR-OPR-002).
+        if !cr_docs.is_empty() {
+            b.docs(&format!("{root}/03-stateful-clusters/crs.yaml"), &cr_docs);
+        }
+        let mut st_resources = vec!["stateful.yaml"];
+        if !cr_docs.is_empty() {
+            st_resources.push("crs.yaml");
+        }
         b.kustomization(
             &format!("{root}/03-stateful-clusters/kustomization.yaml"),
-            &["stateful.yaml"],
+            &st_resources,
         );
 
-        // --- 04a provisioners (content-addressed job stubs) ---
+        // --- 04a provisioners (only for declared provider provisioners) ---
         b.docs(
             &format!("{root}/04a-provisioners-day2/jobs.yaml"),
-            &provisioner_jobs(&cluster.id, topology, cluster),
+            &provisioner_jobs(&cluster.id, topology, cluster, passports),
         );
         b.kustomization(
             &format!("{root}/04a-provisioners-day2/kustomization.yaml"),
             &["jobs.yaml"],
         );
 
-        // --- 04b expand migrations ---
+        // --- 04b expand migrations (canonical Jobs, GR B5) ---
         b.docs(
             &format!("{root}/04b-app-migrations-expand/jobs.yaml"),
-            &migration_jobs(&cluster.id, &cluster.components),
+            &migration_jobs(&cluster.id, cluster, passports, &provider_names),
         );
         b.kustomization(
             &format!("{root}/04b-app-migrations-expand/kustomization.yaml"),
@@ -327,10 +411,9 @@ pub fn compile(
         b.docs(&format!("{root}/05-applications/workloads.yaml"), &app_docs);
         b.docs(&format!("{root}/05-applications/pdb.yaml"), &pdb_docs);
         b.docs(&format!("{root}/05-applications/hpa.yaml"), &hpa_docs);
-        b.docs(
-            &format!("{root}/05-applications/secrets.yaml"),
-            &secret_docs,
-        );
+        b.docs(&format!("{root}/05-applications/services.yaml"), &svc_docs);
+        b.docs(&format!("{root}/05-applications/configmaps.yaml"), &cm_docs);
+        b.docs(&format!("{root}/05-applications/pvc.yaml"), &pvc_docs);
         b.docs(
             &format!("{root}/05-applications/routes.yaml"),
             &artifacts.routes,
@@ -342,19 +425,27 @@ pub fn compile(
                 "workloads.yaml",
                 "pdb.yaml",
                 "hpa.yaml",
-                "secrets.yaml",
+                "services.yaml",
+                "configmaps.yaml",
+                "pvc.yaml",
                 "routes.yaml",
             ],
         );
 
-        // --- 06 zero-trust & observability ---
+        // --- 06 zero-trust & observability (k8s-native components only) ---
+        let native_comps: Vec<amispec_schema::ComponentInstance> = cluster
+            .components
+            .iter()
+            .filter(|c| !adapter_outputs.contains_key(&c.id))
+            .cloned()
+            .collect();
         b.docs(
             &format!("{root}/06-zero-trust-and-observability/netpols.yaml"),
-            &network_policies(&cluster.id, &cluster.components, opts.provenance),
+            &network_policies(&cluster.id, &native_comps, opts.provenance),
         );
         b.docs(
             &format!("{root}/06-zero-trust-and-observability/observability.yaml"),
-            &observability_objects(&cluster.id, &cluster.components, opts.provenance),
+            &observability_objects(&cluster.id, &native_comps, opts.provenance),
         );
         let mut trust_resources = vec!["netpols.yaml", "observability.yaml"];
         if !artifacts.edge_policies.is_empty() {
@@ -537,6 +628,479 @@ fn user_spec_delta(comp: &amispec_schema::ComponentInstance) -> Value {
 }
 
 #[allow(clippy::too_many_arguments)]
+
+// ---------------------------------------------------------------------------
+// Operator-adapter model + binding resolution (GR-OPR-002/006, GR-CRED)
+// ---------------------------------------------------------------------------
+
+fn val_str(v: &serde_json::Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Bindings whose `to` is this component (its consumers).
+fn incoming_bindings<'a>(
+    cluster: &'a amispec_schema::Cluster,
+    comp_id: &str,
+) -> Vec<&'a amispec_schema::Binding> {
+    let mut v: Vec<&amispec_schema::Binding> = cluster
+        .bindings
+        .iter()
+        .filter(|b| b.to == comp_id)
+        .collect();
+    for c in &cluster.components {
+        for b in &c.bindings {
+            if b.to == comp_id {
+                v.push(b);
+            }
+        }
+    }
+    v
+}
+
+/// Bindings owned by this component (its own requirements).
+fn outgoing_bindings<'a>(
+    cluster: &'a amispec_schema::Cluster,
+    comp: &'a amispec_schema::ComponentInstance,
+) -> Vec<&'a amispec_schema::Binding> {
+    let mut v: Vec<&amispec_schema::Binding> = comp.bindings.iter().collect();
+    for b in &cluster.bindings {
+        if b.from.as_deref() == Some(comp.id.as_str()) {
+            v.push(b);
+        }
+    }
+    v
+}
+
+/// Internal service URL of a provider endpoint (name derivation contract:
+/// Service = component id, namespace = provider zone).
+fn provider_service_url(
+    cluster: &amispec_schema::Cluster,
+    provider_id: &str,
+    endpoint: &str,
+) -> String {
+    let (zone, port) = cluster
+        .components
+        .iter()
+        .find(|c| c.id == provider_id)
+        .and_then(|c| {
+            let zone = c.zone.clone().unwrap_or_else(|| "default".into());
+            Some((zone, 0))
+        })
+        .unwrap_or_else(|| ("default".into(), 0));
+    let _ = endpoint;
+    let _ = port;
+    format!("http://{provider_id}.{zone}.svc.cluster.local")
+}
+
+/// Model fed to the adapter pack (explicit carriers only — no hidden logic).
+fn build_adapter_model(
+    comp: &amispec_schema::ComponentInstance,
+    ps: &PassportSummary,
+    cluster: &amispec_schema::Cluster,
+) -> Result<Value, CompileError> {
+    let mut m = Map::new();
+    m.insert("id".into(), json!(comp.id));
+    m.insert("namespace".into(), json!(ns_of(comp)));
+    m.insert("mode".into(), json!(comp.topology.mode));
+    m.insert("replicas".into(), json!(comp.topology.replicas.unwrap_or(1)));
+
+    let image = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.image.clone())
+        .or_else(|| ps.image.clone())
+        .ok_or_else(|| CompileError::MissingImage(comp.id.clone()))?;
+    let digest = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.image_digest.clone())
+        .or_else(|| ps.image_digest.clone())
+        .ok_or_else(|| CompileError::MissingImage(comp.id.clone()))?;
+    m.insert("image".into(), json!(image));
+    m.insert("imageDigest".into(), json!(digest));
+
+    let mut res = Map::new();
+    // Whole-core values stay integers ("2", not "2.0") — CR quantity form.
+    let cpu = comp.resources.cpu_cores;
+    let cpu_json = if cpu.fract() == 0.0 {
+        json!(cpu as i64)
+    } else {
+        json!(cpu)
+    };
+    res.insert("cpuCores".into(), cpu_json);
+    res.insert("memoryMb".into(), json!(comp.resources.memory_mb));
+    res.insert("hugepagesMb".into(), json!(ps.shm_size_mb.unwrap_or(0)));
+    m.insert("resources".into(), Value::Object(res));
+
+    // GUC parameters (`targetPath: postgresql.parameters.<guc>`): passport
+    // defaults overlaid with topology config (declared = enforced).
+    let mut cfg = Map::new();
+    for (name, target) in &ps.param_target_paths {
+        let Some(guc) = target.strip_prefix("postgresql.parameters.") else {
+            continue;
+        };
+        let val = comp
+            .config
+            .as_ref()
+            .and_then(|c| c.get(name))
+            .cloned()
+            .or_else(|| ps.param_defaults.get(name).cloned());
+        if let Some(v) = val {
+            cfg.insert(guc.to_string(), v);
+        }
+    }
+    m.insert("config".into(), Value::Object(cfg));
+
+    let cfg_str = |key: &str, default: &str| -> String {
+        comp.config
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .map(val_str)
+            .or_else(|| ps.param_defaults.get(key).map(val_str))
+            .unwrap_or_else(|| default.to_string())
+    };
+    let data_size = comp.storage.as_ref().map(|s| s.size_gb).unwrap_or(8);
+    let wal_size = comp
+        .volumes
+        .get("wal")
+        .map(|v| v.size_gb)
+        .unwrap_or(3);
+    let mut vols = Map::new();
+    let mut data = Map::new();
+    data.insert(
+        "class".into(),
+        json!(comp
+            .storage
+            .as_ref()
+            .and_then(|s| s.class.clone())
+            .unwrap_or_default()),
+    );
+    data.insert("sizeGb".into(), json!(data_size));
+    vols.insert("data".into(), Value::Object(data));
+    let mut wal = Map::new();
+    wal.insert(
+        "class".into(),
+        json!(comp
+            .volumes
+            .get("wal")
+            .and_then(|v| v.class.clone())
+            .unwrap_or_default()),
+    );
+    wal.insert("sizeGb".into(), json!(wal_size));
+    vols.insert("wal".into(), Value::Object(wal));
+    m.insert("volumes".into(), Value::Object(vols));
+
+    // Consumption parameters (GR-OPR-005): per-binding, from consumers.
+    let mut db = Map::new();
+    let mut roles: Vec<Value> = Vec::new();
+    for b in incoming_bindings(cluster, &comp.id) {
+        let p = &b.params;
+        let gp = |k: &str| p.get(k).map(val_str);
+        if let Some(name) = gp("database") {
+            db.insert("name".into(), json!(name));
+            db.insert("owner".into(), json!(gp("deployRole").unwrap_or_default()));
+            db.insert("ownerSecret".into(), json!(gp("deploySecret").unwrap_or_default()));
+        }
+        if let Some(rn) = gp("runtimeRole") {
+            roles.push(json!({
+                "name": rn,
+                "secret": gp("runtimeSecret").unwrap_or_default(),
+                "login": true
+            }));
+        }
+    }
+    if !db.is_empty() {
+        m.insert("database".into(), Value::Object(db));
+    }
+    m.insert("managedRoles".into(), Value::Array(roles));
+
+    m.insert("pooler".into(), json!({
+        "enabled": true,
+        "instances": cfg_str("poolerInstances", "2").parse::<u32>().unwrap_or(2),
+    }));
+
+    // Backup contract: passport operations.backup + own s3 binding params.
+    let mut backup = Map::new();
+    let enabled = comp.backup_target.is_some();
+    backup.insert("enabled".into(), json!(enabled));
+    if enabled {
+        let bnd = outgoing_bindings(cluster, comp)
+            .into_iter()
+            .find(|b| b.params.contains_key("bucket"))
+            .ok_or_else(|| CompileError::Generic(format!(
+                "component `{}`: backupTarget set but no binding with params.bucket (GR-OPR-005)",
+                comp.id
+            )))?;
+        let gp = |k: &str| bnd.params.get(k).map(val_str);
+        let provider = bnd.to.clone();
+        backup.insert("objectStoreName".into(), json!(gp("objectStore").unwrap_or_else(|| format!("{}-store", comp.id))));
+        backup.insert("destinationPath".into(), json!(format!("s3://{}/", gp("bucket").unwrap_or_default())));
+        backup.insert("endpointURL".into(), json!(format!("{}:8333", provider_service_url(cluster, &provider, "s3"))));
+        backup.insert("s3Secret".into(), json!(gp("clientSecret").unwrap_or_default()));
+        let bs = ps.backup.as_ref();
+        backup.insert("schedule".into(), json!(bs.map(|b| b.default_cron.clone()).unwrap_or_else(|| "0 2 * * *".into())));
+        backup.insert("retentionDays".into(), json!(bs.map(|b| b.retention_days).unwrap_or(30)));
+    }
+    m.insert("backup".into(), Value::Object(backup));
+
+    // io_uring needs an unconfined seccomp profile (product knowledge).
+    let seccomp = if cfg_str("io_method", "worker") == "io_uring" {
+        "Unconfined"
+    } else {
+        "RuntimeDefault"
+    };
+    m.insert("seccomp".into(), json!(seccomp));
+    Ok(Value::Object(m))
+}
+
+/// Consumer env from `requires[].envMapping` + binding params/secrets for ONE
+/// process (token vocabulary: `$names.X`, `$params.X`, `$secret.<process>.<key>`.
+/// Env vars scoped to other processes (per-process envMapping) are skipped.
+fn binding_env(
+    comp: &amispec_schema::ComponentInstance,
+    ps: &PassportSummary,
+    cluster: &amispec_schema::Cluster,
+    provider_names: &BTreeMap<String, BTreeMap<String, String>>,
+    process: &str,
+) -> Vec<Value> {
+    let mut env = Vec::new();
+    for b in outgoing_bindings(cluster, comp) {
+        let Some(req) = b.as_requirement.as_deref() else { continue };
+        let Some(env_map) = ps.requires_env.get(req) else { continue };
+        for (var, ev) in env_map {
+            let Some(token) = ev.token_for(process) else { continue };
+            if let Some(name) = token.strip_prefix("$names.") {
+                let val = provider_names
+                    .get(&b.to)
+                    .and_then(|m| m.get(name))
+                    .cloned()
+                    .unwrap_or_default();
+                env.push(json!({"name": var, "value": val}));
+            } else if let Some(key) = token.strip_prefix("$params.") {
+                let val = b.params.get(key).map(val_str).unwrap_or_default();
+                env.push(json!({"name": var, "value": val}));
+            } else if let Some(rest) = token.strip_prefix("$secret.") {
+                let (proc, key) = rest.split_once('.').unwrap_or(("", "password"));
+                let role = ps.processes.get(proc).cloned().unwrap_or_default();
+                let secret = if role == "deploy" {
+                    b.params.get("deploySecret")
+                } else {
+                    b.params.get("runtimeSecret")
+                }
+                .map(val_str)
+                .unwrap_or_default();
+                env.push(json!({"name": var, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}));
+            } else {
+                // Literal value (escape hatch for static env).
+                env.push(json!({"name": var, "value": token}));
+            }
+        }
+    }
+    env
+}
+
+/// First process with the given role (`deploy` → migration Job, `runtime` → workload).
+fn process_with_role(ps: &PassportSummary, role: &str) -> Option<String> {
+    ps.processes
+        .iter()
+        .find(|(_, r)| r.as_str() == role)
+        .map(|(n, _)| n.clone())
+}
+
+/// Static container env from `workload.container.env[]`.
+fn container_env(ps: &PassportSummary) -> Vec<Value> {
+    ps.env_decls
+        .iter()
+        .map(|e| {
+            let mut m = Map::new();
+            m.insert("name".into(), json!(e.name));
+            if let Some(v) = &e.value {
+                m.insert("value".into(), json!(v));
+            }
+            if let Some(fp) = &e.field_path {
+                m.insert(
+                    "valueFrom".into(),
+                    json!({"fieldRef": {"fieldPath": fp}}),
+                );
+            } else if let Some(sn) = &e.secret_name {
+                m.insert(
+                    "valueFrom".into(),
+                    json!({"secretKeyRef": {"name": sn, "key": e.secret_key.clone().unwrap_or_default()}}),
+                );
+            }
+            Value::Object(m)
+        })
+        .collect()
+}
+
+/// Probe → k8s probe object. Only declared fields are emitted (absent fields
+/// keep the Kubernetes defaults — spec equality with hand-written manifests).
+fn probe_object(p: &ProbeDecl) -> Value {
+    let mut m = Map::new();
+    match p.probe_type.as_str() {
+        "exec" => {
+            m.insert("exec".into(), json!({"command": p.command}));
+        }
+        "http" => {
+            let mut h = Map::new();
+            h.insert("port".into(), json!(p.port.unwrap_or(80)));
+            if let Some(path) = &p.path {
+                h.insert("path".into(), json!(path));
+            }
+            m.insert("httpGet".into(), Value::Object(h));
+        }
+        _ => {
+            m.insert("tcpSocket".into(), json!({"port": p.port.unwrap_or(0)}));
+        }
+    }
+    if let Some(v) = p.initial_delay_seconds {
+        m.insert("initialDelaySeconds".into(), json!(v));
+    }
+    if let Some(v) = p.period_seconds {
+        m.insert("periodSeconds".into(), json!(v));
+    }
+    if let Some(v) = p.timeout_seconds {
+        m.insert("timeoutSeconds".into(), json!(v));
+    }
+    if let Some(v) = p.failure_threshold {
+        m.insert("failureThreshold".into(), json!(v));
+    }
+    Value::Object(m)
+}
+
+/// Resolve a `$params.<key>` token or literal against component config +
+/// passport parameter defaults.
+fn resolve_param_token(
+    token: &str,
+    comp: &amispec_schema::ComponentInstance,
+    ps: &PassportSummary,
+) -> String {
+    if let Some(key) = token.strip_prefix("$params.") {
+        comp.config
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .map(val_str)
+            .or_else(|| ps.param_defaults.get(key).map(val_str))
+            .unwrap_or_default()
+    } else {
+        token.to_string()
+    }
+}
+
+/// Script ConfigMaps (`<component>-<script>`, key = `path` or the script name)
+/// — declared content of `scripts` (Q3/A: migrations run from 04b Jobs).
+fn script_config_maps(comp: &amispec_schema::ComponentInstance, ps: &PassportSummary) -> Vec<Value> {
+    ps.scripts
+        .iter()
+        .filter(|s| !s.inline.is_empty())
+        .map(|s| {
+            let key = s
+                .path
+                .clone()
+                .unwrap_or_else(|| s.name.clone());
+            json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": format!("{}-{}", comp.id, s.name), "namespace": ns_of(comp)},
+                "data": { key: s.inline }
+            })
+        })
+        .collect()
+}
+
+/// Exported non-secret tokens (`provides[].clientContract.exportedTokens`)
+/// materialized as ConfigMap `<component>-endpoint`. Values may reference the
+/// provider's own parameters via `$params.<key>`.
+fn exported_tokens_config_map(
+    comp: &amispec_schema::ComponentInstance,
+    ps: &PassportSummary,
+) -> Option<Value> {
+    if ps.exported_tokens.is_empty() {
+        return None;
+    }
+    let data: Map<String, Value> = ps
+        .exported_tokens
+        .iter()
+        .map(|(k, v)| (k.clone(), json!(resolve_param_token(v, comp, ps))))
+        .collect();
+    Some(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": format!("{}-endpoint", comp.id),
+            "namespace": ns_of(comp),
+            "labels": {"app.kubernetes.io/name": comp.id},
+        },
+        "data": Value::Object(data)
+    }))
+}
+
+/// ClusterIP Service for a k8s-native provider's declared endpoints
+/// (operator-crd services belong to the operator — not emitted).
+fn endpoint_service(comp: &amispec_schema::ComponentInstance, ps: &PassportSummary) -> Option<Value> {
+    if ps.operator_spec.is_some() || ps.endpoints.is_empty() {
+        return None;
+    }
+    let ports: Vec<Value> = ps
+        .endpoints
+        .iter()
+        .map(|e| json!({"name": e.name, "port": e.container_port, "targetPort": e.container_port}))
+        .collect();
+    Some(json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": comp.id,
+            "namespace": ns_of(comp),
+            "labels": {"app.kubernetes.io/name": comp.id, "app.kubernetes.io/instance": comp.id}
+        },
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {"app.kubernetes.io/name": comp.id},
+            "ports": ports
+        }
+    }))
+}
+
+/// Standalone PVC `<component>-data` for Deployment workloads with `storage`
+/// (StatefulSets use volumeClaimTemplates instead).
+fn persistent_volume_claim(
+    cluster_id: &str,
+    comp: &amispec_schema::ComponentInstance,
+    pin: &str,
+    provenance: bool,
+) -> Option<Value> {
+    let st = comp.storage.as_ref()?;
+    let mut labels = Map::new();
+    labels.insert("app.kubernetes.io/name".into(), json!(comp.id));
+    labels.insert("app.kubernetes.io/component".into(), json!("data"));
+    if provenance {
+        labels.insert(LABEL_COMPONENT_ID.into(), json!(comp.id));
+        labels.insert(LABEL_PASSPORT.into(), json!(pin));
+        labels.insert(LABEL_CLUSTER_ID.into(), json!(cluster_id));
+        labels.insert(LABEL_STAGE.into(), json!("05-applications"));
+    }
+    Some(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": format!("{}-data", comp.id),
+            "namespace": ns_of(comp),
+            "labels": Value::Object(labels),
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "storageClassName": st.class.clone().unwrap_or_else(|| DEFAULT_STORAGE_CLASS.to_string()),
+            "resources": {
+                "requests": { "storage": format!("{}Gi", st.size_gb) }
+            }
+        }
+    }))
+}
+
 fn workload_object(
     cluster_id: &str,
     comp: &amispec_schema::ComponentInstance,
@@ -546,7 +1110,9 @@ fn workload_object(
     sidecar_names: &[String],
     provenance: bool,
     maintenance_window: Option<&str>,
-    data_mount_path: Option<&str>,
+    ps: Option<&PassportSummary>,
+    cluster: &amispec_schema::Cluster,
+    provider_names: &BTreeMap<String, BTreeMap<String, String>>,
     passport_image: &str,
     passport_digest: Option<&str>,
     stateful: bool,
@@ -575,7 +1141,6 @@ fn workload_object(
     }
 
     let mut annotations = Map::new();
-    annotations.insert("reloader.stakater.com/auto".into(), json!("true"));
     if provenance {
         annotations.insert(
             LABEL_USER_SPEC_DELTA.into(),
@@ -691,62 +1256,253 @@ fn workload_object(
         Some(d) => format!("{image_base}@{d}"),
         None => image_base,
     };
-    let mut container = json!({
-        "name": "app",
-        "image": image_ref,
-        "resources": {
-            "requests": {
-                "cpu": comp.resources.cpu_cores.to_string(),
-                "memory": format!("{}Mi", comp.resources.memory_mb)
-            },
-            "limits": {
-                "memory": format!("{}Mi", comp.resources.memory_mb)
+    // Resource envelope: explicit requests/limits from the topology, else the
+    // documented default (requests = cpuCores/memoryMb, memory limit only).
+    let req_cpu = comp
+        .resources
+        .requests
+        .as_ref()
+        .and_then(|r| r.cpu_cores)
+        .unwrap_or(comp.resources.cpu_cores);
+    let req_mem = comp
+        .resources
+        .requests
+        .as_ref()
+        .and_then(|r| r.memory_mb)
+        .unwrap_or(comp.resources.memory_mb);
+    let mut res = Map::new();
+    res.insert(
+        "requests".into(),
+        json!({
+            "cpu": req_cpu.to_string(),
+            "memory": format!("{}Mi", req_mem)
+        }),
+    );
+    let mut limits = Map::new();
+    limits.insert(
+        "memory".into(),
+        json!(format!(
+            "{}Mi",
+            comp.resources
+                .limits
+                .as_ref()
+                .and_then(|l| l.memory_mb)
+                .unwrap_or(comp.resources.memory_mb)
+        )),
+    );
+    if let Some(cpu) = comp.resources.limits.as_ref().and_then(|l| l.cpu_cores) {
+        limits.insert("cpu".into(), json!(cpu.to_string()));
+    }
+    res.insert("limits".into(), Value::Object(limits));
+
+    let mut container = json!({ "name": "app", "image": image_ref });
+    if let Some(n) = ps.and_then(|p| p.container_name.as_deref()) {
+        container.as_object_mut().unwrap().insert("name".into(), json!(n));
+    }
+    container
+        .as_object_mut()
+        .unwrap()
+        .insert("resources".into(), Value::Object(res));
+    // Command/args: topology override > passport declaration.
+    if let Some(cmd) = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.command.as_ref())
+        .or_else(|| ps.map(|p| &p.command))
+        .filter(|c| !c.is_empty())
+    {
+        container
+            .as_object_mut()
+            .unwrap()
+            .insert("command".into(), json!(cmd));
+    }
+    if let Some(args) = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.args.as_ref())
+        .or_else(|| ps.map(|p| &p.args))
+        .filter(|a| !a.is_empty())
+    {
+        container
+            .as_object_mut()
+            .unwrap()
+            .insert("args".into(), json!(args));
+    }
+    // Env: declared static/derived env + binding env of runtime processes.
+    let mut env: Vec<Value> = Vec::new();
+    if let Some(ps) = ps {
+        env.extend(container_env(ps));
+        for (proc, role) in &ps.processes {
+            if role == "runtime" {
+                env.extend(binding_env(comp, ps, cluster, provider_names, proc));
             }
         }
-    });
-    // Data volume (topology `storage`): the workload mounts the claim at the
-    // passport's declared data directory (A1.3 / R4 — persistence contract).
-    if comp.storage.is_some() {
-        let mount = data_mount_path.unwrap_or("/data");
-        container.as_object_mut().unwrap().insert(
-            "volumeMounts".into(),
-            json!([{ "name": "data", "mountPath": mount }]),
-        );
     }
-    // Non-secret configuration from the topology `config` map becomes container
-    // env (declared = enforced). Secrets stay in the SOPS world (ADR 0009) and
-    // arrive via A6.1 autoprovisioning — never as plaintext config values.
-    if let Some(cfg) = &comp.config
-        && !cfg.is_empty()
-    {
-        let env: Vec<Value> = cfg
-            .iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    other => other.to_string(),
-                };
-                json!({ "name": k, "value": val })
-            })
-            .collect();
+    if !env.is_empty() {
         container
             .as_object_mut()
             .unwrap()
             .insert("env".into(), Value::Array(env));
     }
+    // Container ports (full inventory; expose contracts reference a subset).
+    if let Some(ps) = ps
+        && !ps.ports.is_empty()
+    {
+        let ports: Vec<Value> = ps
+            .ports
+            .iter()
+            .map(|p| json!({"name": p.name, "containerPort": p.container_port}))
+            .collect();
+        container
+            .as_object_mut()
+            .unwrap()
+            .insert("ports".into(), Value::Array(ports));
+    }
+    // Probes (only declared fields — absent fields keep Kubernetes defaults).
+    if let Some(ps) = ps {
+        let mut probes = Map::new();
+        if let Some(p) = &ps.probes.readiness {
+            probes.insert("readinessProbe".into(), probe_object(p));
+        }
+        if let Some(p) = &ps.probes.liveness {
+            probes.insert("livenessProbe".into(), probe_object(p));
+        }
+        if let Some(p) = &ps.probes.startup {
+            probes.insert("startupProbe".into(), probe_object(p));
+        }
+        for (k, v) in probes {
+            container.as_object_mut().unwrap().insert(k, v);
+        }
+    }
+    // Container-level security hardening (declared).
+    if let Some(sc) = ps.and_then(|p| p.security_context.as_ref()) {
+        let mut csc = Map::new();
+        if let Some(v) = sc.allow_privilege_escalation {
+            csc.insert("allowPrivilegeEscalation".into(), json!(v));
+        }
+        if !sc.capabilities_drop.is_empty() {
+            csc.insert(
+                "capabilities".into(),
+                json!({"drop": sc.capabilities_drop}),
+            );
+        }
+        if !csc.is_empty() {
+            container
+                .as_object_mut()
+                .unwrap()
+                .insert("securityContext".into(), Value::Object(csc));
+        }
+    }
+    // Volumes: data claim + config mounts (scripts ConfigMaps / secrets).
+    let mut pod_volumes: Vec<Value> = Vec::new();
+    let mut mounts: Vec<Value> = Vec::new();
+    if comp.storage.is_some() {
+        let mount = ps
+            .and_then(|p| p.data_mount_path.as_deref())
+            .unwrap_or("/data");
+        mounts.push(json!({ "name": "data", "mountPath": mount }));
+        // Deployment workloads reference a standalone PVC (`<id>-data`);
+        // StatefulSets get the claim via volumeClaimTemplates.
+        if !stateful {
+            pod_volumes.push(json!({
+                "name": "data",
+                "persistentVolumeClaim": { "claimName": format!("{}-data", comp.id) }
+            }));
+        }
+    }
+    if let Some(ps) = ps {
+        for cm in &ps.config_mounts {
+            let source = cm
+                .source
+                .as_deref()
+                .map(|s| resolve_param_token(s, comp, ps))
+                .unwrap_or_else(|| cm.name.clone());
+            let mut vol = Map::new();
+            vol.insert("name".into(), json!(cm.name));
+            if cm.from_secret {
+                let mut s = Map::new();
+                s.insert("secretName".into(), json!(source));
+                if !cm.items.is_empty() {
+                    let items: Vec<Value> = cm
+                        .items
+                        .iter()
+                        .map(|(k, p)| {
+                            let mut i = Map::new();
+                            i.insert("key".into(), json!(k));
+                            if let Some(p) = p {
+                                i.insert("path".into(), json!(p));
+                            }
+                            Value::Object(i)
+                        })
+                        .collect();
+                    s.insert("items".into(), Value::Array(items));
+                }
+                vol.insert("secret".into(), Value::Object(s));
+            } else {
+                // Script ConfigMap (`<component>-<script name>`).
+                let mut c = Map::new();
+                c.insert("name".into(), json!(format!("{}-{}", comp.id, source)));
+                if let Some(mode) = cm.default_mode {
+                    c.insert("defaultMode".into(), json!(mode));
+                }
+                vol.insert("configMap".into(), Value::Object(c));
+            }
+            pod_volumes.push(Value::Object(vol));
+            let mut m = Map::new();
+            m.insert("name".into(), json!(cm.name));
+            m.insert("mountPath".into(), json!(cm.mount_path));
+            if let Some(sp) = &cm.sub_path {
+                m.insert("subPath".into(), json!(sp));
+            }
+            if cm.read_only {
+                m.insert("readOnly".into(), json!(true));
+            }
+            mounts.push(Value::Object(m));
+        }
+    }
+    if !mounts.is_empty() {
+        container
+            .as_object_mut()
+            .unwrap()
+            .insert("volumeMounts".into(), Value::Array(mounts));
+    }
     pod_spec.insert("containers".into(), json!([container]));
-    pod_spec.insert(
-        "securityContext".into(),
-        json!({
-            "runAsNonRoot": true,
-            "runAsUser": 10001,
-            "fsGroup": 10001
-        }),
-    );
+    if !pod_volumes.is_empty() {
+        pod_spec.insert("volumes".into(), Value::Array(pod_volumes));
+    }
+    // Pod-level security context: only when the passport declares one
+    // (hand-written stacks without hardening don't get platform defaults).
+    if let Some(sc) = ps.and_then(|p| p.security_context.as_ref()) {
+        let mut psc = Map::new();
+        if let Some(v) = sc.run_as_non_root {
+            psc.insert("runAsNonRoot".into(), json!(v));
+        }
+        if let Some(v) = sc.run_as_user {
+            psc.insert("runAsUser".into(), json!(v));
+        }
+        if let Some(v) = sc.run_as_group {
+            psc.insert("runAsGroup".into(), json!(v));
+        }
+        if let Some(v) = sc.fs_group {
+            psc.insert("fsGroup".into(), json!(v));
+        }
+        if let Some(v) = &sc.seccomp_profile {
+            psc.insert("seccompProfile".into(), json!({"type": v}));
+        }
+        if !psc.is_empty() {
+            pod_spec.insert("securityContext".into(), Value::Object(psc));
+        }
+    }
 
     let mut spec = Map::new();
+    // Update strategy from the passport topology mode (recreate is explicit;
+    // rolling is the Kubernetes default and stays omitted).
+    let strategy = ps
+        .and_then(|p| p.update_strategies.get(&comp.topology.mode))
+        .map(|s| s.as_str());
+    if matches!(strategy, Some("recreate")) {
+        spec.insert("strategy".into(), json!({"type": "Recreate"}));
+    }
     if kind == "StatefulSet" {
         spec.insert("serviceName".into(), json!(comp.id.clone()));
         if let Some(st) = &comp.storage {
@@ -757,7 +1513,7 @@ fn workload_object(
                     "metadata": { "name": "data" },
                     "spec": {
                         "accessModes": ["ReadWriteOnce"],
-                        "storageClassName": DEFAULT_STORAGE_CLASS,
+                        "storageClassName": st.class.clone().unwrap_or_else(|| DEFAULT_STORAGE_CLASS.to_string()),
                         "resources": {
                             "requests": { "storage": format!("{}Gi", st.size_gb) }
                         }
@@ -863,48 +1619,15 @@ fn hpa_object(
     }))
 }
 
-fn binding_secret(
-    cluster_id: &str,
-    comp: &amispec_schema::ComponentInstance,
-    pin: &str,
-    delta: &Value,
-    edges: &[String],
-) -> Value {
-    let mut annotations = Map::new();
-    annotations.insert(
-        LABEL_USER_SPEC_DELTA.into(),
-        json!(serde_json::to_string(delta).unwrap_or_else(|_| "{}".into())),
-    );
-    if !edges.is_empty() {
-        annotations.insert(LABEL_BINDING_EDGE.into(), json!(edges.join(",")));
-    }
-    json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": format!("{}-bindings", comp.id),
-            "namespace": comp.zone.clone().unwrap_or_else(|| "default".into()),
-            "labels": {
-                LABEL_COMPONENT_ID: comp.id,
-                LABEL_PASSPORT: pin,
-                LABEL_CLUSTER_ID: cluster_id,
-                LABEL_STAGE: "05-applications",
-            },
-            "annotations": Value::Object(annotations),
-        },
-        "type": "Opaque",
-        "stringData": {
-            // placeholder keys; real values come from SOPS
-            "_amispec.component": comp.id.clone(),
-            "_amispec.passport": pin.to_string(),
-        }
-    })
-}
-
+/// Provisioner Jobs (04a) — emitted ONLY for binding edges whose PROVIDER
+/// declares `provides[].provisioner` (GR-OPR-005: no implicit provisioning).
+/// The placeholder command is the provider driver contract's job; the
+/// provisioner driver itself is a catalog artifact (see adapter packs).
 fn provisioner_jobs(
     cluster_id: &str,
-    topology: &TopologyBlueprint,
+    _topology: &TopologyBlueprint,
     cluster: &amispec_schema::Cluster,
+    passports: &PassportIndex,
 ) -> Vec<Value> {
     let mut jobs = Vec::new();
     // Inline component bindings + cluster-level bindings (from = component id)
@@ -919,6 +1642,17 @@ fn provisioner_jobs(
         edges.push((from, b));
     }
     for (from_id, b) in edges {
+        // Gate: the provider must declare a provisioner for the target slot.
+        let provider_declares = cluster
+            .components
+            .iter()
+            .find(|c| c.id == b.to)
+            .and_then(|c| passports.get(&c.passport))
+            .map(|ps| ps.has_provisioner)
+            .unwrap_or(false);
+        if !provider_declares {
+            continue;
+        }
         let hash = short_hash(&format!(
             "{}:{}:{}",
             from_id,
@@ -962,15 +1696,54 @@ fn provisioner_jobs(
             }
         }));
     }
-    // external resources are referenced for backup-vault etc.
-    let _ = topology;
     jobs
 }
 
-fn migration_jobs(cluster_id: &str, comps: &[amispec_schema::ComponentInstance]) -> Vec<Value> {
+/// Migration Jobs (04b) — the canonical form of the deploy-process schema
+/// expansion (GR: initContainer is the PoC variant). One Job per component
+/// whose `lifecycle.preDeployExpandCommand` references a script; the Job runs
+/// the declared script content with the deploy-role credentials.
+fn migration_jobs(
+    cluster_id: &str,
+    cluster: &amispec_schema::Cluster,
+    passports: &PassportIndex,
+    provider_names: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Vec<Value> {
     let mut jobs = Vec::new();
-    for comp in comps {
-        let hash = short_hash(&format!("expand:{}", comp.id));
+    for comp in &cluster.components {
+        let Some(ps) = passports.get(&comp.passport) else {
+            continue;
+        };
+        // Only components with a declared pre-deploy expansion produce jobs.
+        let Some(script) = pre_deploy_script(ps) else {
+            continue;
+        };
+        let hash = short_hash(&script.inline);
+        let deploy_proc = process_with_role(ps, "deploy");
+        let mut env = match &deploy_proc {
+            Some(p) => binding_env(comp, ps, cluster, provider_names, p),
+            None => Vec::new(),
+        };
+        // Ground-truth compatibility: psql/pg tools read PG* env natively.
+        env.sort_by(|a, b| {
+            a.get("name")
+                .and_then(|v| v.as_str())
+                .cmp(&b.get("name").and_then(|v| v.as_str()))
+        });
+        let script_key = script
+            .path
+            .clone()
+            .unwrap_or_else(|| script.name.clone());
+        let runner: Vec<String> = match script.runtime.as_str() {
+            "sql" => vec![
+                "psql".into(),
+                "-v".into(),
+                "ON_ERROR_STOP=1".into(),
+                "-f".into(),
+                format!("/amispec/scripts/{script_key}"),
+            ],
+            _ => vec!["sh".into(), format!("/amispec/scripts/{script_key}")],
+        };
         jobs.push(json!({
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -991,8 +1764,18 @@ fn migration_jobs(cluster_id: &str, comps: &[amispec_schema::ComponentInstance])
                         "restartPolicy": "Never",
                         "containers": [{
                             "name": "migrate",
-                            "image": "busybox:1.36",
-                            "command": ["sh", "-c", "echo expand-schema && exit 0"]
+                            "image": migration_image(comp, ps),
+                            "command": runner,
+                            "env": env,
+                            "volumeMounts": [{
+                                "name": "scripts",
+                                "mountPath": "/amispec/scripts",
+                                "readOnly": true
+                            }]
+                        }],
+                        "volumes": [{
+                            "name": "scripts",
+                            "configMap": {"name": format!("{}-{}", comp.id, script.name)}
                         }]
                     }
                 }
@@ -1000,6 +1783,35 @@ fn migration_jobs(cluster_id: &str, comps: &[amispec_schema::ComponentInstance])
         }));
     }
     jobs
+}
+
+/// The script referenced by `workload.lifecycle.preDeployExpandCommand`.
+fn pre_deploy_script(ps: &PassportSummary) -> Option<&ScriptSummary> {
+    ps.pre_deploy_script.as_deref()
+        .and_then(|name| ps.scripts.iter().find(|s| s.name == name))
+}
+
+/// Image for migration Jobs: the component's own image (override > passport),
+/// pinned per GR-IMG-001 — the deploy process runs in the product's runtime.
+fn migration_image(
+    comp: &amispec_schema::ComponentInstance,
+    ps: &PassportSummary,
+) -> String {
+    let base = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.image.clone())
+        .or_else(|| ps.image.clone())
+        .unwrap_or_else(|| "busybox:1.36".into());
+    let digest = comp
+        .workload_override
+        .as_ref()
+        .and_then(|w| w.image_digest.clone())
+        .or_else(|| ps.image_digest.clone());
+    match digest {
+        Some(d) => format!("{base}@{d}"),
+        None => base,
+    }
 }
 
 /// Namespace of a component's workload objects (zone == namespace).
@@ -1286,7 +2098,11 @@ pub enum CompileError {
         layer: String,
         lb_id: String,
     },
+    #[error("{0}")]
+    Generic(String),
 }
+
+pub mod adapter;
 
 #[cfg(test)]
 mod tests {

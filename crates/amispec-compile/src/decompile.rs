@@ -93,7 +93,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
             "GatewayClass" | "Gateway" | "CiliumLoadBalancerIPPool" => {
                 let cb = clusters.entry(cluster_id).or_default();
                 if let Some(lb) = lb_from_provenance(doc) {
-                    cb.load_balancers.insert(lb.id.clone(), lb);
+                    insert_lb(&mut cb.load_balancers, lb);
                 }
             }
             "Service" => {
@@ -108,7 +108,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                 }
                 let cb = clusters.entry(cluster_id).or_default();
                 if let Some(lb) = lb_from_provenance(doc) {
-                    cb.load_balancers.insert(lb.id.clone(), lb);
+                    insert_lb(&mut cb.load_balancers, lb);
                 }
                 if let Some(cid) = component_id.clone() {
                     let comp = cb
@@ -129,6 +129,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                     let pin = get_str(labels, LABEL_PASSPORT).and_then(|p| parse_passport_pin(&p));
                     ComponentInstance {
                         storage: None,
+                        volumes: BTreeMap::new(),
                         id: cid,
                         passport: pin
                             .as_ref()
@@ -149,6 +150,8 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                         resources: ComponentResources {
                             cpu_cores: 1.0,
                             memory_mb: 256,
+                            requests: None,
+                            limits: None,
                         },
                         zone: get_str(labels, LABEL_ZONE),
                         group: None,
@@ -227,7 +230,7 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
                     // trust-border / prereq ConfigMaps carry balancer provenance
                     let cb = clusters.entry(cluster_id).or_default();
                     if let Some(lb) = lb_from_provenance(doc) {
-                        cb.load_balancers.insert(lb.id.clone(), lb);
+                        insert_lb(&mut cb.load_balancers, lb);
                     }
                 }
             }
@@ -281,7 +284,19 @@ pub fn decompile(docs: &[Value]) -> DecompileReport {
             nodes: cb.nodes.into_values().collect(),
             components: cb.components.into_values().collect(),
             bindings: cluster_bindings,
-            load_balancers: cb.load_balancers.into_values().collect(),
+            load_balancers: cb
+                .load_balancers
+                .into_values()
+                .map(|mut lb| {
+                    if lb.layer.is_empty() {
+                        lb.layer = "l7-gateway".into();
+                    }
+                    if lb.provider.is_empty() {
+                        lb.provider = "cilium-envoy".into();
+                    }
+                    lb
+                })
+                .collect(),
             maintenance_window: cb.maintenance_window,
         });
     }
@@ -317,6 +332,7 @@ struct ClusterBuilder {
 fn blank_component(id: &str) -> ComponentInstance {
     ComponentInstance {
         storage: None,
+        volumes: BTreeMap::new(),
         id: id.into(),
         passport: "unknown".into(),
         version: "0.0.0".into(),
@@ -331,6 +347,8 @@ fn blank_component(id: &str) -> ComponentInstance {
         resources: ComponentResources {
             cpu_cores: 1.0,
             memory_mb: 256,
+            requests: None,
+            limits: None,
         },
         zone: None,
         group: None,
@@ -435,6 +453,10 @@ fn push_expose(comp: &mut ComponentInstance, ex: Expose) {
 /// Restore a `LoadBalancer` from provenance labels/annotations (Design Doc
 /// 0025 §2.2). Sources: GatewayClass/Gateway (l7), CiliumLoadBalancerIPPool
 /// and L4 Services (l4), trust-border ConfigMaps (edge-proxy).
+///
+/// Fields not present in this document stay empty — balancer facts are split
+/// across several objects (pool activation + route Service) and merged by
+/// [`insert_lb`]; defaults are applied at finalization.
 fn lb_from_provenance(doc: &Value) -> Option<LoadBalancer> {
     let meta = doc.get("metadata");
     let labels = meta.and_then(|m| m.get("labels"));
@@ -445,8 +467,8 @@ fn lb_from_provenance(doc: &Value) -> Option<LoadBalancer> {
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     Some(LoadBalancer {
         id,
-        layer: get_str(labels, LABEL_LB_LAYER).unwrap_or_else(|| "l7-gateway".into()),
-        provider: get_str(annotations, LABEL_LB_PROVIDER).unwrap_or_else(|| "cilium-envoy".into()),
+        layer: get_str(labels, LABEL_LB_LAYER).unwrap_or_default(),
+        provider: get_str(annotations, LABEL_LB_PROVIDER).unwrap_or_default(),
         upstream_edge: get_str(annotations, LABEL_UPSTREAM_EDGE),
         trusted_proxy_source,
         forwarding_mode: get_str(annotations, LABEL_FORWARDING_MODE),
@@ -463,6 +485,50 @@ fn lb_from_provenance(doc: &Value) -> Option<LoadBalancer> {
             }
         }),
     })
+}
+
+/// Insert a balancer fragment, merging with any earlier fragment of the same
+/// id (activation objects and route Services carry different facts).
+fn insert_lb(map: &mut BTreeMap<String, LoadBalancer>, lb: LoadBalancer) {
+    use std::collections::btree_map::Entry;
+    match map.entry(lb.id.clone()) {
+        Entry::Vacant(v) => {
+            v.insert(lb);
+        }
+        Entry::Occupied(mut o) => {
+            let e = o.get_mut();
+            if e.layer.is_empty() {
+                e.layer = lb.layer;
+            }
+            if e.provider.is_empty() {
+                e.provider = lb.provider;
+            }
+            if e.upstream_edge.is_none() {
+                e.upstream_edge = lb.upstream_edge;
+            }
+            if e.trusted_proxy_source.is_none() {
+                e.trusted_proxy_source = lb.trusted_proxy_source;
+            }
+            if e.forwarding_mode.is_none() {
+                e.forwarding_mode = lb.forwarding_mode;
+            }
+            if e.floating_ip_ref.is_none() {
+                e.floating_ip_ref = lb.floating_ip_ref;
+            }
+            if e.proxy_protocol_v2.is_none() {
+                e.proxy_protocol_v2 = lb.proxy_protocol_v2;
+            }
+            if e.http3_quic.is_none() {
+                e.http3_quic = lb.http3_quic;
+            }
+            if e.tls.is_none() {
+                e.tls = lb.tls;
+            }
+            if e.vip_reachability.is_none() {
+                e.vip_reachability = lb.vip_reachability;
+            }
+        }
+    }
 }
 
 fn apply_workload_facts(
@@ -554,6 +620,8 @@ fn apply_user_delta(comp: &mut ComponentInstance, delta_json: &str) {
         comp.workload_override = Some(amispec_schema::WorkloadOverride {
             image: Some(image.to_string()),
             image_digest,
+            command: None,
+            args: None,
         });
     }
 }
@@ -566,6 +634,8 @@ fn parse_edge(edge: &str, from: &str) -> Option<Binding> {
     };
     let (_f, to) = left.split_once("->")?;
     Some(Binding {
+        params: Default::default(),
+        env_overrides: Default::default(),
         from: Some(from.to_string()),
         to: to.to_string(),
         to_slot: slot,

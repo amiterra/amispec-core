@@ -730,81 +730,14 @@ kind: Kustomization
 resources:
 - stateful.yaml
 === clusters/local/04a-provisioners-day2/jobs.yaml ===
-apiVersion: batch/v1
-kind: Job
-metadata:
-  annotations:
-    amispec.io/binding-edge: 'keycloak->web:'
-  labels:
-    amispec.io/cluster-id: local
-    amispec.io/component-id: keycloak
-    amispec.io/stage: 04a-provisioners-day2
-  name: provision-keycloak-a4acfcfa
-  namespace: default
-spec:
-  backoffLimit: 3
-  template:
-    spec:
-      containers:
-      - command:
-        - sh
-        - -c
-        - echo provision-binding && exit 0
-        image: busybox:1.36
-        name: provisioner
-      restartPolicy: Never
-  ttlSecondsAfterFinished: 86400
+[]
 === clusters/local/04a-provisioners-day2/kustomization.yaml ===
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
 - jobs.yaml
 === clusters/local/04b-app-migrations-expand/jobs.yaml ===
-apiVersion: batch/v1
-kind: Job
-metadata:
-  labels:
-    amispec.io/cluster-id: local
-    amispec.io/component-id: web
-    amispec.io/stage: 04b-app-migrations-expand
-  name: migrate-expand-web-a1897b25
-  namespace: dmz-public
-spec:
-  backoffLimit: 3
-  template:
-    spec:
-      containers:
-      - command:
-        - sh
-        - -c
-        - echo expand-schema && exit 0
-        image: busybox:1.36
-        name: migrate
-      restartPolicy: Never
-  ttlSecondsAfterFinished: 86400
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  labels:
-    amispec.io/cluster-id: local
-    amispec.io/component-id: keycloak
-    amispec.io/stage: 04b-app-migrations-expand
-  name: migrate-expand-keycloak-44a39590
-  namespace: default
-spec:
-  backoffLimit: 3
-  template:
-    spec:
-      containers:
-      - command:
-        - sh
-        - -c
-        - echo expand-schema && exit 0
-        image: busybox:1.36
-        name: migrate
-      restartPolicy: Never
-  ttlSecondsAfterFinished: 86400
+[]
 === clusters/local/04b-app-migrations-expand/kustomization.yaml ===
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -825,7 +758,6 @@ kind: Deployment
 metadata:
   annotations:
     amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":2,"shards":null},"workloadOverride":null,"zone":"dmz-public"}'
-    reloader.stakater.com/auto: 'true'
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
@@ -845,7 +777,6 @@ spec:
     metadata:
       annotations:
         amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":2,"shards":null},"workloadOverride":null,"zone":"dmz-public"}'
-        reloader.stakater.com/auto: 'true'
       labels:
         amispec.io/cluster-id: local
         amispec.io/component-id: web
@@ -864,10 +795,6 @@ spec:
           requests:
             cpu: '1'
             memory: 256Mi
-      securityContext:
-        fsGroup: 10001
-        runAsNonRoot: true
-        runAsUser: 10001
       terminationGracePeriodSeconds: 65
 ---
 apiVersion: apps/v1
@@ -875,7 +802,6 @@ kind: Deployment
 metadata:
   annotations:
     amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
-    reloader.stakater.com/auto: 'true'
   labels:
     amispec.io/cluster-id: local
     amispec.io/component-id: keycloak
@@ -894,7 +820,6 @@ spec:
     metadata:
       annotations:
         amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
-        reloader.stakater.com/auto: 'true'
       labels:
         amispec.io/cluster-id: local
         amispec.io/component-id: keycloak
@@ -912,10 +837,6 @@ spec:
           requests:
             cpu: '1'
             memory: 256Mi
-      securityContext:
-        fsGroup: 10001
-        runAsNonRoot: true
-        runAsUser: 10001
       terminationGracePeriodSeconds: 65
 === clusters/local/05-applications/pdb.yaml ===
 apiVersion: policy/v1
@@ -951,41 +872,33 @@ spec:
       app.kubernetes.io/name: keycloak
 === clusters/local/05-applications/hpa.yaml ===
 []
-=== clusters/local/05-applications/secrets.yaml ===
+=== clusters/local/05-applications/services.yaml ===
 apiVersion: v1
-kind: Secret
+kind: Service
 metadata:
-  annotations:
-    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":2,"shards":null},"workloadOverride":null,"zone":"dmz-public"}'
   labels:
-    amispec.io/cluster-id: local
-    amispec.io/component-id: web
-    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
-    amispec.io/stage: 05-applications
-  name: web-bindings
-  namespace: dmz-public
-stringData:
-  _amispec.component: web
-  _amispec.passport: test-org.stateless-app.1.0.0-rev1
-type: Opaque
----
-apiVersion: v1
-kind: Secret
-metadata:
-  annotations:
-    amispec.io/binding-edge: 'keycloak->web:'
-    amispec.io/user-spec-delta: '{"backupTarget":null,"config":null,"group":null,"resources":{"cpuCores":1.0,"memoryMb":256},"topology":{"committedReplicas":null,"mode":"standalone","replicas":null,"shards":null},"workloadOverride":null,"zone":null}'
-  labels:
-    amispec.io/cluster-id: local
-    amispec.io/component-id: keycloak
-    amispec.io/passport: test-org.stateless-app.1.0.0-rev1
-    amispec.io/stage: 05-applications
-  name: keycloak-bindings
+    app.kubernetes.io/instance: keycloak
+    app.kubernetes.io/name: keycloak
+  name: keycloak
   namespace: default
-stringData:
-  _amispec.component: keycloak
-  _amispec.passport: test-org.stateless-app.1.0.0-rev1
-type: Opaque
+spec:
+  ports:
+  - name: web
+    port: 8080
+    targetPort: 8080
+  - name: admin
+    port: 9090
+    targetPort: 9090
+  - name: mqtt
+    port: 1883
+    targetPort: 1883
+  selector:
+    app.kubernetes.io/name: keycloak
+  type: ClusterIP
+=== clusters/local/05-applications/configmaps.yaml ===
+[]
+=== clusters/local/05-applications/pvc.yaml ===
+[]
 === clusters/local/05-applications/routes.yaml ===
 apiVersion: v1
 kind: Service
@@ -1023,11 +936,13 @@ metadata:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
     amispec.io/endpoint: web
+    amispec.io/lb-id: main-l7
     amispec.io/lb-layer: l7-gateway
     amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: public
     amispec.io/stage: 05-applications
     amispec.io/via-balancer: main-l7
+    app.kubernetes.io/name: web
   name: web-web
   namespace: dmz-public
 spec:
@@ -1068,11 +983,13 @@ metadata:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
     amispec.io/endpoint: admin
+    amispec.io/lb-id: main-l7
     amispec.io/lb-layer: l7-gateway
     amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: protected
     amispec.io/stage: 05-applications
     amispec.io/via-balancer: main-l7
+    app.kubernetes.io/name: web
   name: web-admin
   namespace: dmz-public
 spec:
@@ -1105,17 +1022,18 @@ metadata:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
     amispec.io/endpoint: mqtt
+    amispec.io/lb-id: mqtt-l4
     amispec.io/lb-layer: l4-balancer
     amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: public
     amispec.io/stage: 05-applications
     amispec.io/via-balancer: mqtt-l4
+    app.kubernetes.io/name: web
   name: web-mqtt
   namespace: dmz-public
 spec:
-  allocateLoadBalancerNodePorts: false
   ports:
-  - name: data
+  - name: tcp
     port: 1883
     protocol: TCP
     targetPort: 1883
@@ -1130,7 +1048,9 @@ resources:
 - workloads.yaml
 - pdb.yaml
 - hpa.yaml
-- secrets.yaml
+- services.yaml
+- configmaps.yaml
+- pvc.yaml
 - routes.yaml
 === clusters/local/06-zero-trust-and-observability/netpols.yaml ===
 apiVersion: cilium.io/v2
@@ -1232,10 +1152,12 @@ metadata:
     amispec.io/cluster-id: local
     amispec.io/component-id: web
     amispec.io/endpoint: admin
+    amispec.io/lb-id: main-l7
     amispec.io/passport: test-org.stateless-app.1.0.0-rev1
     amispec.io/scope: protected
     amispec.io/stage: 06-zero-trust-and-observability
     amispec.io/via-balancer: main-l7
+    app.kubernetes.io/name: web
   name: local-web-edge-guard
   namespace: dmz-public
 spec:

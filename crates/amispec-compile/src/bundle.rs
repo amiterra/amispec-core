@@ -188,6 +188,7 @@ pub fn build_bundle(
     cluster_id: &str,
     passports: &PassportIndex,
     provenance: bool,
+    adapter_dir: Option<&std::path::Path>,
 ) -> Result<Bundle, BundleError> {
     if topology.clusters.len() != 1 {
         return Err(BundleError::NotSingleCluster {
@@ -249,7 +250,11 @@ pub fn build_bundle(
 
     // Compiled tree (the same deterministic projection `ami compile` writes).
     let opts = Options::dry();
-    let opts = Options { provenance, ..opts };
+    let opts = Options {
+        provenance,
+        adapter_dir: adapter_dir.map(|p| p.to_path_buf()),
+        ..opts
+    };
     let result = compile(topology, passports, &opts)?;
     let mut tree = result.files;
     tree.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
@@ -389,7 +394,7 @@ interfaces:
 
     fn bundle() -> Bundle {
         let topo = amispec_schema::parse_topology(TOPOLOGY).unwrap();
-        build_bundle(&topo, "c0", &catalog(), true).unwrap()
+        build_bundle(&topo, "c0", &catalog(), true, None).unwrap()
     }
 
     #[test]
@@ -428,7 +433,7 @@ interfaces:
         idx.insert_document(&WEB_PASSPORT.replace("8080", "8081"))
             .unwrap();
         let topo = amispec_schema::parse_topology(TOPOLOGY).unwrap();
-        let c = build_bundle(&topo, "c0", &idx, true).unwrap();
+        let c = build_bundle(&topo, "c0", &idx, true, None).unwrap();
         assert_ne!(a.tree_hash, c.tree_hash);
 
         // schema_hash covers topology + pin identity (id@version-rev, 0021):
@@ -437,7 +442,7 @@ interfaces:
             &TOPOLOGY.replace("hostname: app.example.io", "hostname: other.example.io"),
         )
         .unwrap();
-        let d = build_bundle(&topo2, "c0", &catalog(), true).unwrap();
+        let d = build_bundle(&topo2, "c0", &catalog(), true, None).unwrap();
         assert_ne!(a.schema_hash, d.schema_hash);
     }
 
@@ -474,7 +479,7 @@ interfaces:
         summary.id = "stateless-app".into();
         idx.insert(summary);
         let topo = amispec_schema::parse_topology(TOPOLOGY).unwrap();
-        let err = build_bundle(&topo, "c0", &idx, true).unwrap_err();
+        let err = build_bundle(&topo, "c0", &idx, true, None).unwrap_err();
         assert!(
             matches!(err, BundleError::MissingCatalogContent { .. }),
             "{err}"
@@ -488,7 +493,7 @@ interfaces:
             "    bindings: []\n  - id: c1\n    name: Other\n    domain: other.io\n    security: { sopsRecipients: [age1abc123] }\n    cni: { engine: cilium-ebpf, clusterMeshId: 2 }\n    nodes: []\n    components: []",
         );
         let topo = amispec_schema::parse_topology(&yaml).unwrap();
-        let err = build_bundle(&topo, "c0", &catalog(), true).unwrap_err();
+        let err = build_bundle(&topo, "c0", &catalog(), true, None).unwrap_err();
         assert!(matches!(err, BundleError::NotSingleCluster { .. }), "{err}");
     }
 

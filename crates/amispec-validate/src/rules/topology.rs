@@ -690,7 +690,7 @@ pub fn check(root: &Map, out: &mut Vec<Finding>) {
                     deep::check_storage_override(st, &format!("{ppath}.storage"), out);
                 }
                 if let Some(vols) = comp.get("volumes") {
-                    deep::check_volumes_map(vols, &format!("{ppath}.volumes"), out);
+                    deep::check_volumes_override_map(vols, &format!("{ppath}.volumes"), out);
                 }
                 if let Some(ex) = comp.get("expose").and_then(as_seq) {
                     for (ei, e) in ex.iter().enumerate() {

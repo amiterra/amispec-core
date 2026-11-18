@@ -196,28 +196,39 @@ fn l4_services(
 
         let mut spec = Map::new();
         spec.insert("type".into(), json!("LoadBalancer"));
-        // VIP-only reachability: no NodePort leak on every node (zero-step
-        // security review — the announced/allocated address is the only path).
-        spec.insert("allocateLoadBalancerNodePorts".into(), json!(false));
         spec.insert(
             "selector".into(),
             json!({ "app.kubernetes.io/name": ex.component.id.clone() }),
         );
+        // Service port: conventional port per endpoint protocol (http → 80,
+        // https → 443), else the backend port; targetPort = container port.
+        let service_port = match ex.backend_protocol.as_str() {
+            "http" => 80,
+            "https" => 443,
+            _ => ex.backend_port,
+        };
         spec.insert(
             "ports".into(),
             json!([{
-                "name": "data",
-                "port": ex.backend_port,
+                "name": ex.backend_protocol,
+                "port": service_port,
                 "targetPort": ex.backend_port,
                 "protocol": "TCP",
             }]),
         );
 
+        // Service identity (GR B6): named after the component when it exposes
+        // exactly one endpoint; `<component>-<endpoint>` otherwise.
+        let svc_name = if ex.component_exposure_count == 1 {
+            ex.component.id.clone()
+        } else {
+            format!("{}-{}", ex.component.id, ex.expose.endpoint)
+        };
         out.objects.push(json!({
             "apiVersion": "v1",
             "kind": "Service",
             "metadata": {
-                "name": format!("{}-{}", ex.component.id, ex.expose.endpoint),
+                "name": svc_name,
                 "namespace": ex.component.zone.clone().unwrap_or_else(|| "default".into()),
                 "labels": Value::Object(labels),
                 "annotations": Value::Object(annotations),

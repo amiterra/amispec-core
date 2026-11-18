@@ -56,6 +56,9 @@ enum Command {
         /// Passport files or directories (endpoint contracts resolve expose ports)
         #[arg(long = "passport")]
         passports: Vec<PathBuf>,
+        /// Catalog `adapters/` root (operator adapter packs, GR-OPR-006)
+        #[arg(long = "adapters")]
+        adapters: Option<PathBuf>,
     },
     /// Reverse-decompile a FluxCD tree (with AmiSpec provenance) to topology.yaml
     Decompile {
@@ -126,6 +129,7 @@ fn main() -> Result<()> {
             out,
             dry_run,
             passports,
+            adapters,
         } => {
             let raw = std::fs::read_to_string(&input)
                 .with_context(|| format!("read {}", input.display()))?;
@@ -135,6 +139,7 @@ fn main() -> Result<()> {
                 out_dir: out.clone(),
                 provenance: true,
                 dry_run,
+                adapter_dir: adapters,
             };
             let result = compile(&topo, &index, &opts).context("compile")?;
             for w in &result.warnings {
